@@ -101,25 +101,28 @@ func (doc *cacheDoc[T]) RemoveLabels(labelsOrig []string) model.LabelSet {
 }
 
 func (doc *cacheDoc[T]) Delete() {
+	doc.Lock()
 	if doc.expirer != nil {
 		doc.expirer.Stop()
 		doc.expirer = nil
 	}
 	if doc.bucket == nil {
+		doc.Unlock()
 		return
 	}
-	doc.RLock()
 	labels := []string{}
 	for k := range doc.labels {
 		labels = append(labels, k)
 	}
-	doc.RUnlock()
-	doc.bucket.removeLabels(doc.key, labels)
-	doc.bucket.Remove([]string{doc.key})
+	bucket := doc.bucket
 	doc.bucket = nil
+	doc.Unlock()
+	bucket.removeLabels(doc.key, labels)
+	bucket.Remove([]string{doc.key})
 }
 
 func (doc *cacheDoc[T]) Expire(d time.Duration, onExpire func(model.CacheDoc)) {
+	doc.Lock()
 	if doc.expirer != nil {
 		doc.expirer.Stop()
 		doc.expirer = nil
@@ -128,6 +131,9 @@ func (doc *cacheDoc[T]) Expire(d time.Duration, onExpire func(model.CacheDoc)) {
 		if onExpire != nil {
 			onExpire(doc)
 		}
+		doc.Lock()
 		doc.expirer = nil
+		doc.Unlock()
 	})
+	doc.Unlock()
 }

@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/leonkaihao/cache/pkg/model"
@@ -15,6 +16,7 @@ const (
 )
 
 type cacheDoc[T any] struct {
+	sync.RWMutex
 	bucket  *bucket[T]
 	key     string
 	expirer *time.Timer
@@ -206,10 +208,12 @@ func (doc *cacheDoc[T]) RemoveLabels(labels []string) model.LabelSet {
 func (doc *cacheDoc[T]) Delete() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+	doc.Lock()
 	if doc.expirer != nil {
 		doc.expirer.Stop()
 		doc.expirer = nil
 	}
+	doc.Unlock()
 	redisCli := doc.bucket.cli.getRedisCli()
 	labelSet := model.LabelSet{}
 	newKey := formatDocKey(doc.bucket, doc.key)
@@ -226,6 +230,7 @@ func (doc *cacheDoc[T]) Delete() {
 }
 
 func (doc *cacheDoc[T]) Expire(d time.Duration, onExpire func(model.CacheDoc)) {
+	doc.Lock()
 	if doc.expirer != nil {
 		doc.expirer.Stop()
 		doc.expirer = nil
@@ -234,6 +239,9 @@ func (doc *cacheDoc[T]) Expire(d time.Duration, onExpire func(model.CacheDoc)) {
 		if onExpire != nil {
 			onExpire(doc)
 		}
+		doc.Lock()
 		doc.expirer = nil
+		doc.Unlock()
 	})
+	doc.Unlock()
 }
