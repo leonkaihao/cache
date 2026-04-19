@@ -1,5 +1,12 @@
 # Cache
 
+[![CI](https://github.com/leonkaihao/cache/actions/workflows/ci.yml/badge.svg)](https://github.com/leonkaihao/cache/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/leonkaihao/cache)](https://goreportcard.com/report/github.com/leonkaihao/cache)
+[![codecov](https://codecov.io/gh/leonkaihao/cache/branch/master/graph/badge.svg)](https://codecov.io/gh/leonkaihao/cache)
+[![Go Reference](https://pkg.go.dev/badge/github.com/leonkaihao/cache.svg)](https://pkg.go.dev/github.com/leonkaihao/cache)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Release](https://img.shields.io/github/v/release/leonkaihao/cache)](https://github.com/leonkaihao/cache/releases)
+
 A flexible and type-safe caching library for Go with support for both in-memory and Redis backends.
 
 ## Features
