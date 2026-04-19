@@ -2,7 +2,6 @@ package mem
 
 import (
 	"github.com/leonkaihao/cache/pkg/model"
-	log "github.com/leonkaihao/log"
 )
 
 type client struct {
@@ -11,7 +10,7 @@ type client struct {
 }
 
 func NewClient() model.CacheClient {
-	log.Info("in-mem cache client started")
+	Logger.Info("in-mem cache client started")
 	return &client{
 		bkts:        make(map[string]model.CacheBucket),
 		collections: make(map[string]model.CacheCollection),

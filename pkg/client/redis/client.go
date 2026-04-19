@@ -3,7 +3,6 @@ package redis
 import (
 	redis "github.com/redis/go-redis/v9"
 	"github.com/leonkaihao/cache/pkg/model"
-	log "github.com/leonkaihao/log"
 )
 
 type client struct {
@@ -13,7 +12,7 @@ type client struct {
 }
 
 func NewClient(url, pass string, dbIndex int) model.CacheClient {
-	log.Infof("redis cache client started with url %v", url)
+	Logger.Info("redis cache client started", "url", url)
 	return &client{
 		rc:          redis.NewClient(&redis.Options{Addr: url, Password: pass, DB: dbIndex}),
 		bkts:        make(map[string]model.CacheBucket),

@@ -8,7 +8,6 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/leonkaihao/cache/pkg/consts"
 	"github.com/leonkaihao/cache/pkg/model"
-	log "github.com/leonkaihao/log"
 )
 
 type bucket[T any] struct {
@@ -19,9 +18,10 @@ type bucket[T any] struct {
 }
 
 func NewBucket[T any](cli model.CacheClient, name string, coder model.Coder) *bucket[T] {
+	c := cli.(*client)
 	bkt := &bucket[T]{
 		name:  name,
-		cli:   cli.(*client),
+		cli:   c,
 		coder: coder,
 		errs:  []error{},
 	}
@@ -266,7 +266,7 @@ func (bkt *bucket[T]) Scan(match string) []string {
 func (bkt *bucket[T]) Clear() {
 	err := bkt.clear()
 	if err != nil {
-		log.Error(err.Error())
+		Logger.Fatal("bucket clear failed", "error", err)
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/leonkaihao/cache/pkg/model"
-	log "github.com/leonkaihao/log"
 )
 
 type cacheDoc[T any] struct {
@@ -42,7 +41,7 @@ func (doc *cacheDoc[T]) SetValue(val any) model.CacheDoc {
 
 func (doc *cacheDoc[T]) SetValueWithTs(val any, ts time.Time) (model.CacheDoc, bool) {
 	if !ts.After(doc.ts) {
-		log.Debugf("SetValueWithTs: %v not update because %v(incoming time) < %v(current time)", doc.key, ts, doc.ts)
+		Logger.Debug("SetValueWithTs: not update because incoming time is before current time", "key", doc.key, "incoming_time", ts, "current_time", doc.ts)
 		return doc, false
 	}
 	doc.ts = ts
