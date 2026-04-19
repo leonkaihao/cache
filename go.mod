@@ -3,7 +3,6 @@ module github.com/leonkaihao/cache
 go 1.23
 
 require (
-	github.com/golang/protobuf v1.5.4
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/protobuf v1.36.11

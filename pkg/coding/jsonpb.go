@@ -3,30 +3,39 @@ package coding
 import (
 	"errors"
 
-	"github.com/golang/protobuf/jsonpb"
-	"google.golang.org/protobuf/runtime/protoiface"
 	"github.com/leonkaihao/cache/pkg/model"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 type jsonpbCoder struct {
-	marshaller *jsonpb.Marshaler
+	marshaller   *protojson.MarshalOptions
+	unmarshaller *protojson.UnmarshalOptions
 }
 
 func NewJsonpbCoder() model.Coder {
 	return &jsonpbCoder{
-		marshaller: &jsonpb.Marshaler{},
+		marshaller:   &protojson.MarshalOptions{},
+		unmarshaller: &protojson.UnmarshalOptions{},
 	}
 }
 
 func (jc *jsonpbCoder) Encode(data any) (string, error) {
-	return jc.marshaller.MarshalToString(data.(protoiface.MessageV1))
+	msg, ok := data.(proto.Message)
+	if !ok {
+		return "", errors.New("data is not a proto.Message")
+	}
+	bytes, err := jc.marshaller.Marshal(msg)
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
 }
 
 func (jc *jsonpbCoder) Decode(data string, out any) error {
-	switch result := out.(type) {
-	case protoiface.MessageV1:
-		return jsonpb.UnmarshalString(data, result)
-	default:
-		return errors.New("unknown type for decoding")
+	msg, ok := out.(proto.Message)
+	if !ok {
+		return errors.New("out is not a proto.Message")
 	}
+	return jc.unmarshaller.Unmarshal([]byte(data), msg)
 }
