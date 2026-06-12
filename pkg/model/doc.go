@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"time"
 )
 
@@ -8,21 +9,22 @@ type CacheDoc interface {
 	CacheTime
 	CacheExpire
 	Key() string
-	Val() any
-	SetValue(val any) CacheDoc
-	Labels() LabelSet
-	AddLabels(labels []string) LabelSet
-	RemoveLabels(label []string) LabelSet
-	Delete()
+	Val(ctx context.Context) (any, error)
+	SetValue(ctx context.Context, val any) error
+	Labels(ctx context.Context) (LabelSet, error)
+	AddLabels(ctx context.Context, labels []string) error
+	RemoveLabels(ctx context.Context, labels []string) error
+	Delete(ctx context.Context) error
 }
 
 type CacheTime interface {
-	WithTime(ts time.Time) CacheDoc
-	// SetValueWithTs returns doc and flag(value is updated or not)
-	SetValueWithTs(val any, ts time.Time) (CacheDoc, bool)
-	Time() time.Time
+	WithTime(ctx context.Context, ts time.Time) error
+	// SetValueWithTs returns updated flag and error
+	SetValueWithTs(ctx context.Context, val any, ts time.Time) (bool, error)
+	Time(ctx context.Context) (time.Time, error)
 }
 
 type CacheExpire interface {
-	Expire(d time.Duration, onExpire func(CacheDoc))
+	Expire(d time.Duration, onExpire func(CacheDoc)) error
+	CancelExpire() error
 }

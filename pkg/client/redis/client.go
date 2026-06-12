@@ -1,23 +1,39 @@
 package redis
 
 import (
+	"time"
+
 	redis "github.com/redis/go-redis/v9"
 	"github.com/leonkaihao/cache/pkg/model"
 )
 
-type client struct {
-	rc          *redis.Client
-	bkts        map[string]model.CacheBucket
-	collections map[string]model.CacheCollection
+type ClientOption func(*client)
+
+func WithTimeout(d time.Duration) ClientOption {
+	return func(c *client) {
+		c.defaultTimeout = d
+	}
 }
 
-func NewClient(url, pass string, dbIndex int) model.CacheClient {
-	Logger.Info("redis cache client started", "url", url)
-	return &client{
-		rc:          redis.NewClient(&redis.Options{Addr: url, Password: pass, DB: dbIndex}),
-		bkts:        make(map[string]model.CacheBucket),
-		collections: make(map[string]model.CacheCollection),
+type client struct {
+	rc             *redis.Client
+	bkts           map[string]model.CacheBucket
+	collections    map[string]model.CacheCollection
+	defaultTimeout time.Duration
+}
+
+func NewClient(url, pass string, dbIndex int, opts ...ClientOption) model.CacheClient {
+	cli := &client{
+		rc:             redis.NewClient(&redis.Options{Addr: url, Password: pass, DB: dbIndex}),
+		bkts:           make(map[string]model.CacheBucket),
+		collections:    make(map[string]model.CacheCollection),
+		defaultTimeout: time.Second, // Default timeout
 	}
+	for _, opt := range opts {
+		opt(cli)
+	}
+	Logger.Info("redis cache client started", "url", url, "timeout", cli.defaultTimeout)
+	return cli
 }
 
 func (cli *client) WithBucket(bkt model.CacheBucket) model.CacheBucket {

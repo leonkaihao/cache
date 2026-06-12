@@ -1,5 +1,7 @@
 package model
 
+import "context"
+
 type MembersMap map[string]struct{}
 
 func (smm MembersMap) List() []string {
@@ -17,13 +19,12 @@ func (smm MembersMap) Exists(mem string) bool {
 
 type CacheCollection interface {
 	Name() string
-	Keys() []string
-	MembersMap(key string) MembersMap
-	MembersMaps(keys []string) []MembersMap
-	Add(key string, members []string)
-	Remove(key string, members []string)
-	Clear(key string)
-	ClearAll()
-	Delete()
-	GetLastErrors() []error
+	Keys(ctx context.Context) ([]string, error)
+	MembersMap(ctx context.Context, key string) (MembersMap, error)
+	MembersMaps(ctx context.Context, keys []string) ([]MembersMap, error)
+	Add(ctx context.Context, key string, members []string) error
+	Remove(ctx context.Context, key string, members []string) error
+	Clear(ctx context.Context, key string) error
+	ClearAll(ctx context.Context) error
+	Delete(ctx context.Context) error
 }

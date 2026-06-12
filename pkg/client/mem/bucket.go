@@ -1,6 +1,7 @@
 package mem
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"sync"
@@ -15,103 +16,124 @@ type bucket[T any] struct {
 	cli    *client
 	docs   map[string]model.CacheDoc  // keys
 	labels map[string]map[string]bool // label: docKeys
-	errs   []error
 }
 
-func NewBucket[T any](cli model.CacheClient, name string) model.CacheBucket {
-	scli, _ := cli.(*client)
+func NewBucket[T any](cli model.CacheClient, name string) (model.CacheBucket, error) {
+	scli, ok := cli.(*client)
+	if !ok {
+		return nil, fmt.Errorf("expected *mem.client, got %T", cli)
+	}
 	return &bucket[T]{
 		name:   name,
 		cli:    scli,
 		docs:   make(map[string]model.CacheDoc),
 		labels: make(map[string]map[string]bool),
-		errs:   []error{},
-	}
+	}, nil
 }
+
 func (bkt *bucket[T]) Name() string {
 	return bkt.name
 }
 
-func (bkt *bucket[T]) Docs(keys []string) []model.CacheDoc {
-	defer bkt.cleanErrors()
+func (bkt *bucket[T]) Docs(ctx context.Context, keys []string) ([]model.CacheDoc, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	bkt.RLock()
 	defer bkt.RUnlock()
+
 	docs := make([]model.CacheDoc, len(keys))
 	for i, key := range keys {
-		docs[i] = bkt.docs[key]
+		docs[i] = bkt.docs[key] // nil if not exists
 	}
-	return docs
+	return docs, nil
 }
 
-func (bkt *bucket[T]) Values(keys []string) []any {
-	defer bkt.cleanErrors()
+func (bkt *bucket[T]) Values(ctx context.Context, keys []string) ([]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	bkt.RLock()
 	defer bkt.RUnlock()
+
 	values := make([]any, len(keys))
 	for i, key := range keys {
-		doc := bkt.docs[key]
-		if doc != nil {
-			values[i] = doc.Val()
+		if doc := bkt.docs[key]; doc != nil {
+			val, _ := doc.Val(ctx) // Ignore inner error in batch operation
+			values[i] = val
 		}
 	}
-	return values
+	return values, nil
 }
 
 // Update directly update the value with incoming data
-func (bkt *bucket[T]) Update(key string, data any) model.CacheDoc {
-	defer bkt.cleanErrors()
+func (bkt *bucket[T]) Update(ctx context.Context, key string, data any) (model.CacheDoc, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	val, ok := data.(*T)
 	if !ok {
-		bkt.appendError(fmt.Errorf("Update: update doc key '%v' with an empty value", key))
-		return nil
+		return nil, fmt.Errorf("invalid data type: expected *%T, got %T", new(T), data)
 	}
+
 	if key == "" {
-		bkt.appendError(fmt.Errorf("Update: update doc %v with an empty key", val))
-		return nil
+		return nil, fmt.Errorf("key cannot be empty")
 	}
+
 	bkt.Lock()
 	defer bkt.Unlock()
-	var (
-		doc model.CacheDoc
-	)
-	doc, ok = bkt.docs[key]
+
+	doc, ok := bkt.docs[key]
 	if !ok {
 		doc = NewCacheDoc(bkt, key, val)
+		bkt.docs[key] = doc
 	} else {
-		doc.SetValue(val)
+		if err := doc.SetValue(ctx, val); err != nil {
+			return nil, fmt.Errorf("failed to set value: %w", err)
+		}
 	}
-	bkt.docs[key] = doc
-	return doc
+
+	return doc, nil
 }
 
 // UpdateWithTs update the data with the latest time, otherwise use existing one.
 // if original data don't have time, directly replace it
-func (bkt *bucket[T]) UpdateWithTs(key string, data any, ts time.Time) (model.CacheDoc, bool) {
-	defer bkt.cleanErrors()
+func (bkt *bucket[T]) UpdateWithTs(ctx context.Context, key string, data any, ts time.Time) (model.CacheDoc, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+
 	val, ok := data.(*T)
 	if !ok {
-		bkt.appendError(fmt.Errorf("UpdateWithTs: update doc key '%v' with an empty value", key))
-		return nil, false
+		return nil, false, fmt.Errorf("invalid data type: expected *%T, got %T", new(T), data)
 	}
+
 	if key == "" {
-		bkt.appendError(fmt.Errorf("UpdateWithTs: updated doc %v with an empty key", val))
-		return nil, false
+		return nil, false, fmt.Errorf("key cannot be empty")
 	}
+
 	bkt.Lock()
 	defer bkt.Unlock()
-	var (
-		doc     model.CacheDoc
-		updated bool
-	)
-	doc, ok = bkt.docs[key]
-	if !ok {
-		doc = NewCacheDoc(bkt, key, val).WithTime(ts)
-		updated = true
-	} else {
-		doc, updated = doc.SetValueWithTs(val, ts)
+
+	doc, exists := bkt.docs[key]
+	if !exists {
+		doc = NewCacheDoc(bkt, key, val)
+		if err := doc.WithTime(ctx, ts); err != nil {
+			return nil, false, fmt.Errorf("failed to set time: %w", err)
+		}
+		bkt.docs[key] = doc
+		return doc, true, nil
 	}
-	bkt.docs[key] = doc
-	return doc, updated
+
+	updated, err := doc.SetValueWithTs(ctx, val, ts)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to update with timestamp: %w", err)
+	}
+
+	return doc, updated, nil
 }
 
 // Filter is a way of filtering data with labels
@@ -119,57 +141,66 @@ func (bkt *bucket[T]) UpdateWithTs(key string, data any, ts time.Time) (model.Ca
 // each filter is a string array, label is the item. all the labels inside a filter has OR logic
 // between filters are AND logic
 // i.e. Filter([]string{"foo", "bar"}, []string{"new", "bee"}) means data with label foo OR bar, AND new OR bee.
-func (bkt *bucket[T]) Filter(filterSteps ...[]string) []string { // result keys
-	defer bkt.cleanErrors()
-	bkt.RLock()
-	defer bkt.RUnlock()
-	ret := []string{}
-	if len(filterSteps) == 0 {
-		for key := range bkt.docs {
-			ret = append(ret, key)
-		}
-		return ret
+func (bkt *bucket[T]) Filter(ctx context.Context, filterSteps ...[]string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
-	result := map[string]bool{} // key:true
+	bkt.RLock()
+	defer bkt.RUnlock()
+
+	// Empty filter = return all keys
+	if len(filterSteps) == 0 {
+		keys := make([]string, 0, len(bkt.docs))
+		for key := range bkt.docs {
+			keys = append(keys, key)
+		}
+		return keys, nil
+	}
+
+	result := map[string]bool{}
 
 	for i, labels := range filterSteps {
 		if i == 0 {
+			// First step: OR logic within labels
 			if len(labels) == 0 {
+				// Empty first step = all keys
 				for key := range bkt.docs {
 					result[key] = true
 				}
 				continue
 			}
+
 			for _, label := range labels {
-				keys, ok := bkt.labels[label]
-				if ok {
+				if keys, ok := bkt.labels[label]; ok {
 					for k := range keys {
 						result[k] = true
 					}
 				}
 			}
 		} else {
+			// Subsequent steps: AND with previous result
 			if len(labels) == 0 {
+				// Empty step = no filtering
 				continue
 			}
+
 			for key := range result {
 				doc := bkt.docs[key]
-				match := false
-				for _, label := range labels {
-					_, ok := doc.Labels()[label]
-					match = match || ok
-				}
-				if !match {
+				docLabels, _ := doc.Labels(ctx) // Ignore error in filter
+				if !docLabels.CheckOr(labels) {
 					delete(result, key)
 				}
 			}
 		}
 	}
+
+	keys := make([]string, 0, len(result))
 	for key := range result {
-		ret = append(ret, key)
+		keys = append(keys, key)
 	}
-	return ret
+
+	return keys, nil
 }
 
 // Scan match a key pattern and return all matched keys
@@ -190,22 +221,50 @@ func (bkt *bucket[T]) Filter(filterSteps ...[]string) []string { // result keys
 //		c           matches character c (c != '\\', '-', ']')
 //		'\\' c      matches character c
 //		lo '-' hi   matches character c for lo <= c <= hi
-func (bkt *bucket[T]) Scan(match string) []string {
+func (bkt *bucket[T]) Scan(ctx context.Context, match string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	bkt.RLock()
+	defer bkt.RUnlock()
+
 	result := []string{}
 	for k := range bkt.docs {
-		if matched, err := path.Match(match, k); err == nil && matched {
+		matched, err := path.Match(match, k)
+		if err != nil {
+			return nil, fmt.Errorf("invalid pattern %q: %w", match, err)
+		}
+		if matched {
 			result = append(result, k)
 		}
 	}
-	return result
+
+	return result, nil
 }
 
-func (bkt *bucket[T]) Clear() {
-	defer bkt.cleanErrors()
+func (bkt *bucket[T]) Clear(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	bkt.Lock()
-	defer bkt.Unlock()
+	oldDocs := bkt.docs
 	bkt.docs = make(map[string]model.CacheDoc)
 	bkt.labels = make(map[string]map[string]bool)
+	bkt.Unlock()
+
+	// Stop all expiration timers outside the lock
+	for _, doc := range oldDocs {
+		if cdoc, ok := doc.(*cacheDoc[T]); ok {
+			_ = cdoc.CancelExpire() // Stop timer
+			cdoc.Lock()
+			cdoc.bucket = nil // Mark as deleted
+			cdoc.Unlock()
+		}
+	}
+
+	return nil
 }
 
 func (bkt *bucket[T]) addLabels(key string, labels []string) {
@@ -232,43 +291,47 @@ func (bkt *bucket[T]) removeLabels(key string, labels []string) {
 	}
 }
 
-func (bkt *bucket[T]) Remove(keys []string) []model.CacheDoc {
+func (bkt *bucket[T]) Remove(ctx context.Context, keys []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	bkt.Lock()
 	defer bkt.Unlock()
-	docs := []model.CacheDoc{}
+
 	for _, key := range keys {
 		doc, ok := bkt.docs[key]
-		docs = append(docs, doc)
 		if !ok {
 			continue
 		}
-		for label := range doc.Labels() {
-			delete(bkt.labels[label], doc.Key())
+
+		// Clean up labels
+		docLabels, _ := doc.Labels(ctx) // Ignore error during cleanup
+		for label := range docLabels {
+			if labelMap, exists := bkt.labels[label]; exists {
+				delete(labelMap, key)
+			}
 		}
+
 		delete(bkt.docs, key)
 	}
-	return docs
+
+	return nil
 }
 
-func (bkt *bucket[T]) Delete() {
-	defer bkt.cleanErrors()
+func (bkt *bucket[T]) Delete(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if err := bkt.Clear(ctx); err != nil {
+		return fmt.Errorf("failed to clear bucket: %w", err)
+	}
+
 	if bkt.cli != nil {
 		bkt.cli.RemoveBucket(bkt.name)
 		bkt.cli = nil
 	}
-}
 
-func (bkt *bucket[T]) GetLastErrors() []error {
-	return bkt.errs
-}
-
-func (bkt *bucket[T]) appendError(err error) {
-	if err == nil {
-		return
-	}
-	bkt.errs = append(bkt.errs, err)
-}
-
-func (bkt *bucket[T]) cleanErrors() {
-	bkt.errs = []error{}
+	return nil
 }

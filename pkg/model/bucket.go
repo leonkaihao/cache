@@ -1,20 +1,22 @@
 package model
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type CacheBucket interface {
 	Name() string
-	Docs(keys []string) []CacheDoc
-	Values(keys []string) []any
-	Update(key string, data any) CacheDoc
-	// UpdateWithTs return doc and flag to indicate if data is updated or not
-	UpdateWithTs(key string, data any, ts time.Time) (CacheDoc, bool)
+	Docs(ctx context.Context, keys []string) ([]CacheDoc, error)
+	Values(ctx context.Context, keys []string) ([]any, error)
+	Update(ctx context.Context, key string, data any) (CacheDoc, error)
+	// UpdateWithTs return doc, updated flag, and error
+	UpdateWithTs(ctx context.Context, key string, data any, ts time.Time) (CacheDoc, bool, error)
 	//Filter return all keys that match the given label filters
-	Filter(labelFilters ...[]string) []string
+	Filter(ctx context.Context, labelFilters ...[]string) ([]string, error)
 	// Scan return all keys that match the given pattern
-	Scan(match string) []string
-	Remove(keys []string) []CacheDoc
-	Clear()
-	Delete()
-	GetLastErrors() []error
+	Scan(ctx context.Context, match string) ([]string, error)
+	Remove(ctx context.Context, keys []string) error
+	Clear(ctx context.Context) error
+	Delete(ctx context.Context) error
 }

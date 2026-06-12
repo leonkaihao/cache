@@ -11,128 +11,136 @@ import (
 )
 
 type bucket[T any] struct {
-	name  string
-	cli   *client
-	coder model.Coder
-	errs  []error
+	name    string
+	cli     *client
+	coder   model.Coder
+	timeout time.Duration
 }
 
-func NewBucket[T any](cli model.CacheClient, name string, coder model.Coder) *bucket[T] {
-	c := cli.(*client)
-	bkt := &bucket[T]{
-		name:  name,
-		cli:   c,
-		coder: coder,
-		errs:  []error{},
+func NewBucket[T any](cli model.CacheClient, name string, coder model.Coder) (model.CacheBucket, error) {
+	c, ok := cli.(*client)
+	if !ok {
+		return nil, fmt.Errorf("expected *redis.client, got %T", cli)
 	}
-	return bkt
+	if coder == nil {
+		return nil, fmt.Errorf("coder cannot be nil")
+	}
+	return &bucket[T]{
+		name:    name,
+		cli:     c,
+		coder:   coder,
+		timeout: c.defaultTimeout,
+	}, nil
 }
 
 func (bkt *bucket[T]) Name() string {
 	return bkt.name
 }
 
-func (bkt *bucket[T]) Docs(keys []string) []model.CacheDoc {
-	bkt.cleanErrors()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+func (bkt *bucket[T]) Docs(ctx context.Context, keys []string) ([]model.CacheDoc, error) {
+	ctx, cancel := context.WithTimeout(ctx, bkt.timeout)
 	defer cancel()
+
 	docs := make([]model.CacheDoc, len(keys))
 	redisCli := bkt.cli.getRedisCli()
 	pipe := redisCli.Pipeline()
 	cmds := []*goredis.IntCmd{}
 	newKeys := []string{}
+
 	for _, key := range keys {
 		newKey := formatDocKey(bkt, key)
 		newKeys = append(newKeys, newKey)
 		cmd := pipe.Exists(ctx, newKey)
 		cmds = append(cmds, cmd)
 	}
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		bkt.errs = append(bkt.errs, fmt.Errorf("fail to get values of bucket %v docs, %v", len(keys), err))
+
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		return nil, fmt.Errorf("fail to check docs existence: %w", err)
 	}
+
 	for i, cmd := range cmds {
 		exists, err := cmd.Result()
 		if err != nil {
-			bkt.errs = append(bkt.errs, fmt.Errorf("fail to check cache doc %v, %v", newKeys[i], err))
-			docs[i] = nil
-			continue
+			return nil, fmt.Errorf("fail to check cache doc %v: %w", newKeys[i], err)
 		}
 		if exists == 0 {
 			docs[i] = nil
 			continue
 		}
-		doc := &cacheDoc[T]{
+		docs[i] = &cacheDoc[T]{
 			bucket: bkt,
 			key:    keys[i],
 		}
-		docs[i] = doc
-
 	}
-	return docs
+
+	return docs, nil
 }
 
-func (bkt *bucket[T]) Values(keys []string) []any {
-	bkt.cleanErrors()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+func (bkt *bucket[T]) Values(ctx context.Context, keys []string) ([]any, error) {
+	ctx, cancel := context.WithTimeout(ctx, bkt.timeout)
 	defer cancel()
+
 	values := make([]any, len(keys))
 	redisCli := bkt.cli.getRedisCli()
 	pipe := redisCli.Pipeline()
 	cmds := []*goredis.StringCmd{}
 	newKeys := []string{}
+
 	for _, key := range keys {
 		newKey := formatDocKey(bkt, key)
 		newKeys = append(newKeys, newKey)
 		cmd := pipe.HGet(ctx, newKey, CACHEDOC_VAL)
 		cmds = append(cmds, cmd)
 	}
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		bkt.errs = append(bkt.errs, fmt.Errorf("fail to get values of bucket keys %v, %v", newKeys, err))
+
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		return nil, fmt.Errorf("fail to get values: %w", err)
 	}
+
 	for i, cmd := range cmds {
 		jsonData, err := cmd.Result()
 		if err != nil {
-			bkt.errs = append(bkt.errs, fmt.Errorf("fail to fetch cache doc %v, %v", newKeys[i], err))
-			values[i] = nil
-			continue
+			if err == goredis.Nil {
+				values[i] = nil
+				continue
+			}
+			return nil, fmt.Errorf("fail to fetch cache doc %v: %w", newKeys[i], err)
 		}
 		data := new(T)
-		err = bkt.coder.Decode(jsonData, data)
-		if err != nil {
-			bkt.errs = append(bkt.errs, fmt.Errorf("fail to unmarshal value of cache doc %v, %v", newKeys[i], err))
-			values[i] = nil
-			continue
+		if err := bkt.coder.Decode(jsonData, data); err != nil {
+			return nil, fmt.Errorf("fail to decode value of cache doc %v: %w", newKeys[i], err)
 		}
 		values[i] = data
 	}
-	return values
+
+	return values, nil
 }
 
-// Update directly update the value with incoming data
-func (bkt *bucket[T]) Update(key string, data any) model.CacheDoc {
-	bkt.cleanErrors()
+func (bkt *bucket[T]) Update(ctx context.Context, key string, data any) (model.CacheDoc, error) {
 	if key == "" {
-		bkt.errs = append(bkt.errs, fmt.Errorf("Update: update doc %v with an empty key", data))
-		return nil
+		return nil, fmt.Errorf("key cannot be empty")
 	}
+
 	doc := NewCacheDoc(bkt, key)
-	return doc.SetValue(data)
+	if err := doc.SetValue(ctx, data); err != nil {
+		return nil, err
+	}
+
+	return doc, nil
 }
 
-// UpdateWithTs update the data with the latest time, otherwise use existing one.
-// if original data don't have time, directly replace it
-func (bkt *bucket[T]) UpdateWithTs(key string, data any, ts time.Time) (model.CacheDoc, bool) {
-	bkt.cleanErrors()
+func (bkt *bucket[T]) UpdateWithTs(ctx context.Context, key string, data any, ts time.Time) (model.CacheDoc, bool, error) {
 	if key == "" {
-		bkt.errs = append(bkt.errs, fmt.Errorf("UpdateWithTs: updated doc %v with an empty key", data))
-		return nil, false
+		return nil, false, fmt.Errorf("key cannot be empty")
 	}
+
 	doc := NewCacheDoc(bkt, key)
-	return doc.SetValueWithTs(data, ts)
+	updated, err := doc.SetValueWithTs(ctx, data, ts)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return doc, updated, nil
 }
 
 // Filter is a way of filtering data with labels
@@ -140,23 +148,23 @@ func (bkt *bucket[T]) UpdateWithTs(key string, data any, ts time.Time) (model.Ca
 // each filter is a string array, label is the item. all the labels inside a filter has OR logic
 // between filters are AND logic
 // i.e. Filter([]string{"foo", "bar"}, []string{"new", "bee"}) means data with label foo OR bar, AND new OR bee.
-func (bkt *bucket[T]) Filter(filterSteps ...[]string) []string { // result keys
-	bkt.cleanErrors()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+func (bkt *bucket[T]) Filter(ctx context.Context, filterSteps ...[]string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, bkt.timeout)
 	defer cancel()
 
 	redisCli := bkt.cli.getRedisCli()
+
 	if len(filterSteps) == 0 {
 		result, err := redisCli.SMembers(ctx, formatBucketKeys(bkt)).Result()
 		if err != nil {
-			bkt.errs = append(bkt.errs, fmt.Errorf("fail to get members of bucket doc %v, %v", formatBucketKeys(bkt), err))
-			return nil
+			return nil, fmt.Errorf("fail to get bucket keys: %w", err)
 		}
-		return result
+		return result, nil
 	}
 
 	pipe := redisCli.Pipeline()
 	cmds := map[string]*goredis.StringSliceCmd{}
+
 	for _, labels := range filterSteps {
 		for _, label := range labels {
 			newLabel := formatLabel(bkt, label)
@@ -164,9 +172,9 @@ func (bkt *bucket[T]) Filter(filterSteps ...[]string) []string { // result keys
 			cmds[newLabel] = cmd
 		}
 	}
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		bkt.errs = append(bkt.errs, fmt.Errorf("fail to get values of bucket %v labels, %v", len(cmds), err))
+
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		return nil, fmt.Errorf("fail to get label members: %w", err)
 	}
 
 	filterStepsNew := [][]map[string]bool{}
@@ -175,20 +183,18 @@ func (bkt *bucket[T]) Filter(filterSteps ...[]string) []string { // result keys
 		for _, label := range labels {
 			newLabel := formatLabel(bkt, label)
 			result, err := cmds[newLabel].Result()
-			if err != nil {
-				bkt.errs = append(bkt.errs, fmt.Errorf("fail to get members from label %v, %v", newLabel, err))
-				continue
+			if err != nil && err != goredis.Nil {
+				return nil, fmt.Errorf("fail to get members from label %v: %w", newLabel, err)
 			}
 			newMaps = append(newMaps, arrToMap(result))
 		}
 		filterStepsNew = append(filterStepsNew, newMaps)
 	}
+
 	base := map[string]bool{}
 	for i, keysets := range filterStepsNew {
-		// union all each
-		var (
-			collection = map[string]bool{}
-		)
+		collection := map[string]bool{}
+
 		for j, keyset := range keysets {
 			if j == 0 {
 				collection = keyset
@@ -196,47 +202,34 @@ func (bkt *bucket[T]) Filter(filterSteps ...[]string) []string { // result keys
 			}
 			collection = union(collection, keyset)
 		}
+
 		if len(keysets) == 0 {
-			newLabel := formatBucketKeys(bkt)
-			result, _ := redisCli.SMembers(ctx, newLabel).Result()
+			result, err := redisCli.SMembers(ctx, formatBucketKeys(bkt)).Result()
+			if err != nil {
+				return nil, fmt.Errorf("fail to get bucket keys: %w", err)
+			}
 			collection = arrToMap(result)
 		}
+
 		if i == 0 {
 			base = collection
 			continue
 		}
 
 		base = intersect(base, collection)
-
 	}
 
-	ret := []string{}
+	ret := make([]string, 0, len(base))
 	for key := range base {
 		ret = append(ret, key)
 	}
-	return ret
+
+	return ret, nil
 }
 
 // Scan find all the matched keys with redis scan key pattern within the bucket
-// The pattern syntax is:
-//
-//	pattern:
-//		{ term }
-//	term:
-//		'*'         matches any sequence of non-/ characters
-//		'?'         matches any single non-/ character
-//		'[' [ '^' ] { character-range } ']'
-//		            character class (must be non-empty)
-//		c           matches character c (c != '*', '?', '\\', '[')
-//		'\\' c      matches character c
-//
-//	character-range:
-//		c           matches character c (c != '\\', '-', ']')
-//		'\\' c      matches character c
-//		lo '-' hi   matches character c for lo <= c <= hi
-func (bkt *bucket[T]) Scan(match string) []string {
-	bkt.cleanErrors()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+func (bkt *bucket[T]) Scan(ctx context.Context, match string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, bkt.timeout)
 	defer cancel()
 
 	redisCli := bkt.cli.getRedisCli()
@@ -245,84 +238,103 @@ func (bkt *bucket[T]) Scan(match string) []string {
 		result        = []string{}
 	)
 	pattern := formatBucketKeyMatch(bkt, match)
+
 	for {
 		keys, nextCursor, err := redisCli.Scan(ctx, cursor, pattern, 100).Result()
 		if err != nil {
-			bkt.errs = append(bkt.errs, fmt.Errorf("fail to scan bucket %v with pattern %v, %v", bkt.name, pattern, err))
-			return result
+			return nil, fmt.Errorf("fail to scan bucket %v with pattern %v: %w", bkt.name, pattern, err)
 		}
+
 		for _, key := range keys {
 			trimmedKey := key[len(formatBucketKeys(bkt)):]
 			result = append(result, trimmedKey)
 		}
+
 		cursor = nextCursor
 		if cursor == 0 {
 			break
 		}
 	}
-	return result
+
+	return result, nil
 }
 
-func (bkt *bucket[T]) Clear() {
-	err := bkt.clear()
-	if err != nil {
-		Logger.Fatal("bucket clear failed", "error", err)
-	}
+func (bkt *bucket[T]) Clear(ctx context.Context) error {
+	return bkt.clear(ctx)
 }
 
-func (bkt *bucket[T]) Remove(keys []string) []model.CacheDoc {
-	docs := []model.CacheDoc{}
+func (bkt *bucket[T]) Remove(ctx context.Context, keys []string) error {
 	for _, key := range keys {
-		NewCacheDoc(bkt, key).Delete()
-	}
-	return docs
-}
-
-func (bkt *bucket[T]) Delete() {
-	bkt.cleanErrors()
-	if bkt.cli != nil {
-		err := bkt.clear()
-		if err != nil {
-			bkt.errs = append(bkt.errs, err)
+		doc := NewCacheDoc(bkt, key)
+		if err := doc.Delete(ctx); err != nil {
+			return fmt.Errorf("failed to remove key %s: %w", key, err)
 		}
-		bkt.cli.RemoveBucket(bkt.name)
-		bkt.cli = nil
 	}
-}
-
-func (bkt *bucket[T]) clear() error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	redisCli := bkt.cli.getRedisCli()
-
-	keys, err := redisCli.SMembers(ctx, formatBucketKeys(bkt)).Result()
-	if err != nil {
-		return fmt.Errorf("fail to get members of bucket keyset %v, %v", formatBucketKeys(bkt), err)
-	}
-	for i, key := range keys {
-		keys[i] = formatDocKey(bkt, key)
-	}
-	redisCli.Del(ctx, keys...)
-	redisCli.Del(ctx, formatBucketKeys(bkt))
-
-	labels, err := redisCli.SMembers(ctx, formatBucketLabels(bkt)).Result()
-	if err != nil {
-		return fmt.Errorf("fail to get members of bucket labelset %v, %v", formatBucketLabels(bkt), err)
-	}
-	for i, label := range labels {
-		labels[i] = formatLabel(bkt, label)
-	}
-	redisCli.Del(ctx, labels...)
-	redisCli.Del(ctx, formatBucketLabels(bkt))
 	return nil
 }
 
-func (bkt *bucket[T]) GetLastErrors() []error {
-	return bkt.errs
+func (bkt *bucket[T]) Delete(ctx context.Context) error {
+	if err := bkt.clear(ctx); err != nil {
+		return fmt.Errorf("failed to clear bucket: %w", err)
+	}
+
+	if bkt.cli != nil {
+		bkt.cli.RemoveBucket(bkt.name)
+		bkt.cli = nil
+	}
+
+	return nil
 }
 
-func (bkt *bucket[T]) cleanErrors() {
-	bkt.errs = []error{}
+func (bkt *bucket[T]) clear(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, bkt.timeout)
+	defer cancel()
+
+	redisCli := bkt.cli.getRedisCli()
+
+	keys, err := redisCli.SMembers(ctx, formatBucketKeys(bkt)).Result()
+	if err != nil && err != goredis.Nil {
+		return fmt.Errorf("fail to get members of bucket keyset %v: %w", formatBucketKeys(bkt), err)
+	}
+
+	// Delete all documents
+	if len(keys) > 0 {
+		docKeys := make([]string, len(keys))
+		for i, key := range keys {
+			docKeys[i] = formatDocKey(bkt, key)
+		}
+		if err := redisCli.Del(ctx, docKeys...).Err(); err != nil {
+			return fmt.Errorf("fail to delete doc keys: %w", err)
+		}
+	}
+
+	// Delete bucket keys set
+	if err := redisCli.Del(ctx, formatBucketKeys(bkt)).Err(); err != nil {
+		return fmt.Errorf("fail to delete bucket keys set: %w", err)
+	}
+
+	// Delete labels
+	labels, err := redisCli.SMembers(ctx, formatBucketLabels(bkt)).Result()
+	if err != nil && err != goredis.Nil {
+		return fmt.Errorf("fail to get members of bucket labelset %v: %w", formatBucketLabels(bkt), err)
+	}
+
+	if len(labels) > 0 {
+		labelKeys := make([]string, len(labels))
+		for i, label := range labels {
+			labelKeys[i] = formatLabel(bkt, label)
+		}
+		if err := redisCli.Del(ctx, labelKeys...).Err(); err != nil {
+			return fmt.Errorf("fail to delete label keys: %w", err)
+		}
+	}
+
+	// Delete bucket labels set
+	if err := redisCli.Del(ctx, formatBucketLabels(bkt)).Err(); err != nil {
+		return fmt.Errorf("fail to delete bucket labels set: %w", err)
+	}
+
+	return nil
 }
 
 func arrToMap(src []string) map[string]bool {

@@ -4,45 +4,84 @@
 package redis
 
 import (
+	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_collection_Keys(t *testing.T) {
+	ctx := context.Background()
 	cli := NewClient("localhost:6379", "admin", 1)
 	clt := cli.Collection("xxx")
+	defer clt.Delete(ctx)
 
-	clt.Add("key1", []string{"mem1", "mem2", "mem3"})
-	clt.Add("key2", []string{"mem4", "mem5", "mem6"})
-	clt.Add("key2", []string{})
-	mm := clt.MembersMaps([]string{"key1", "key2"})
-	if len(mm) != 2 || len(mm[0].List()) != 3 || len(mm[1].List()) != 3 {
-		t.Errorf("membermaps checking failed")
-	}
+	require.NoError(t, clt.Add(ctx, "key1", []string{"mem1", "mem2", "mem3"}))
+	require.NoError(t, clt.Add(ctx, "key2", []string{"mem4", "mem5", "mem6"}))
 
-	clt.Remove("key1", []string{"mem1", "mem3"})
-	clt.Clear("key2")
-	if len(clt.Keys()) != 1 || clt.Keys()[0] != "key1" {
-		t.Errorf("expect key key1")
-	}
-	mem := clt.MembersMap("key1")
-	if len(mem) != 1 {
-		t.Errorf("expect 1 mem for key1")
-	}
-	if _, ok := mem["mem2"]; !ok {
-		t.Errorf("expect only mem2 in key1")
-	}
+	// Test that empty members are rejected
+	err := clt.Add(ctx, "key2", []string{})
+	assert.Error(t, err, "Add should reject empty members")
 
-	mem = clt.MembersMap("key2")
-	if mem != nil {
-		t.Errorf("expect nil mem for key2")
-	}
+	mm, err := clt.MembersMaps(ctx, []string{"key1", "key2"})
+	require.NoError(t, err)
+	assert.Len(t, mm, 2)
+	assert.Len(t, mm[0].List(), 3)
+	assert.Len(t, mm[1].List(), 3)
 
-	clt.Remove("key1", []string{"mem2", "mem3"})
-	if len(clt.Keys()) != 1 || clt.Keys()[0] != "key1" {
-		t.Errorf("expect key1")
-	}
-	mm = clt.MembersMaps([]string{"key1", "key2"})
-	if len(mm) != 2 || mm[0] == nil || len(mm[0].List()) != 0 || mm[1] != nil {
-		t.Errorf("membermaps checking failed")
-	}
+	require.NoError(t, clt.Remove(ctx, "key1", []string{"mem1", "mem3"}))
+	require.NoError(t, clt.Clear(ctx, "key2"))
+
+	keys, err := clt.Keys(ctx)
+	require.NoError(t, err)
+	assert.Len(t, keys, 1)
+	assert.Equal(t, "key1", keys[0])
+
+	mem, err := clt.MembersMap(ctx, "key1")
+	require.NoError(t, err)
+	assert.Len(t, mem, 1)
+	_, ok := mem["mem2"]
+	assert.True(t, ok, "expect only mem2 in key1")
+
+	mem, err = clt.MembersMap(ctx, "key2")
+	require.NoError(t, err)
+	assert.Nil(t, mem, "expect nil mem for key2")
+
+	require.NoError(t, clt.Remove(ctx, "key1", []string{"mem2", "mem3"}))
+
+	keys, err = clt.Keys(ctx)
+	require.NoError(t, err)
+	assert.Len(t, keys, 1, "expect key1")
+
+	mm, err = clt.MembersMaps(ctx, []string{"key1", "key2"})
+	require.NoError(t, err)
+	assert.Len(t, mm, 2)
+	assert.NotNil(t, mm[0])
+	assert.Len(t, mm[0].List(), 0)
+	assert.Nil(t, mm[1])
+}
+
+// Test that Add() rejects empty members
+func TestCollectionAddEmptyMembers(t *testing.T) {
+	ctx := context.Background()
+	cli := NewClient("localhost:6379", "admin", 1)
+	clt := cli.Collection("test")
+	defer clt.Delete(ctx)
+
+	err := clt.Add(ctx, "key1", []string{})
+	assert.Error(t, err, "Add should reject empty members")
+	assert.Contains(t, err.Error(), "empty")
+}
+
+// Test that Add() rejects empty key
+func TestCollectionAddEmptyKey(t *testing.T) {
+	ctx := context.Background()
+	cli := NewClient("localhost:6379", "admin", 1)
+	clt := cli.Collection("test")
+	defer clt.Delete(ctx)
+
+	err := clt.Add(ctx, "", []string{"mem1"})
+	assert.Error(t, err, "Add should reject empty key")
+	assert.Contains(t, err.Error(), "key")
 }

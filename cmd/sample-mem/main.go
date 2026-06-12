@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"log"
 	"time"
 
 	cache "github.com/leonkaihao/cache/pkg/client/mem"
@@ -20,85 +22,201 @@ type Bar struct {
 }
 
 func main() {
-	// create client
+	ctx := context.Background()
+
+	// Create client
 	cli := cache.NewClient()
-	// create bucket
-	cli.WithBucket(cache.NewBucket[Foo](cli, "foo1")) // return fooBkt1
-	cli.WithBucket(cache.NewBucket[Bar](cli, "bar1")) // return barBkt1
-	cli.WithBucket(cache.NewBucket[Foo](cli, "foo2")) // return fooBkt2
-	cli.WithBucket(cache.NewBucket[Bar](cli, "bar2")) // return barBkt2
-	bucketOperations(cli)
-	collectionOperations(cli)
+
+	// Create buckets with error handling
+	fooBkt1, err := cache.NewBucket[Foo](cli, "foo1")
+	if err != nil {
+		log.Fatalf("Failed to create foo1 bucket: %v", err)
+	}
+	cli.WithBucket(fooBkt1)
+
+	barBkt1, err := cache.NewBucket[Bar](cli, "bar1")
+	if err != nil {
+		log.Fatalf("Failed to create bar1 bucket: %v", err)
+	}
+	cli.WithBucket(barBkt1)
+
+	fooBkt2, err := cache.NewBucket[Foo](cli, "foo2")
+	if err != nil {
+		log.Fatalf("Failed to create foo2 bucket: %v", err)
+	}
+	cli.WithBucket(fooBkt2)
+
+	barBkt2, err := cache.NewBucket[Bar](cli, "bar2")
+	if err != nil {
+		log.Fatalf("Failed to create bar2 bucket: %v", err)
+	}
+	cli.WithBucket(barBkt2)
+
+	if err := bucketOperations(ctx, cli); err != nil {
+		log.Fatalf("Bucket operations failed: %v", err)
+	}
+
+	if err := collectionOperations(ctx, cli); err != nil {
+		log.Fatalf("Collection operations failed: %v", err)
+	}
+
+	log.Println("All operations completed successfully!")
 }
 
-func bucketOperations(cli model.CacheClient) {
-
+func bucketOperations(ctx context.Context, cli model.CacheClient) error {
 	barBkt2 := cli.Bucket("bar2")
 
-	// fetch existing bucket
+	// Fetch existing bucket
 	fooBkt1 := cli.Bucket("foo1")
-	cli.Bucket("bar1") // return barBkt1
+	_ = cli.Bucket("bar1") // return barBkt1
 
-	// update/insert doc
-	doc1 := fooBkt1.Update("key1", &Foo{A: true, B: 3, C: "str1"}) // update with the object only
-	doc2, updated := fooBkt1.UpdateWithTs("key2", &Foo{A: true, B: 3, C: "str1"}, time.Now())
-	if updated {
-		// set expire for 1 sec then delete
-		doc2.Expire(time.Second, func(doc model.CacheDoc) {
-			doc2.Delete()
-		})
+	// Update/insert doc with context
+	doc1, err := fooBkt1.Update(ctx, "key1", &Foo{A: true, B: 3, C: "str1"})
+	if err != nil {
+		return err
 	}
-	doc3, _ := fooBkt1.UpdateWithTs("key3", &Foo{A: true, B: 3, C: "str1"}, time.Now()) // update based on timeline
-	barBkt2.Update("key3", &Foo{A: true, B: 3, C: "str1"})                              // return doc4
 
-	// add labels
-	ls1 := doc1.AddLabels([]string{"label1", "label2"})
-	doc3.AddLabels([]string{"label2", "label3"})
+	doc2, updated, err := fooBkt1.UpdateWithTs(ctx, "key2", &Foo{A: true, B: 3, C: "str1"}, time.Now())
+	if err != nil {
+		return err
+	}
+	if updated {
+		// Set expire for 1 sec then delete
+		if err := doc2.Expire(time.Second, func(doc model.CacheDoc) {
+			_ = doc.Delete(context.Background())
+		}); err != nil {
+			return err
+		}
+	}
 
-	// check labels
-	ls1.CheckAnd([]string{"label1", "label2"}) // true
-	ls1.CheckAnd([]string{"label1", "label3"}) // false
-	ls1.CheckOr([]string{"label1", "label3"})  // true
-	ls1.CheckOr([]string{"label3", "label4"})  // false
+	doc3, _, err := fooBkt1.UpdateWithTs(ctx, "key3", &Foo{A: true, B: 3, C: "str1"}, time.Now())
+	if err != nil {
+		return err
+	}
 
-	// search with label
-	fooBkt1.Filter([]string{"label1"})           // doc1
-	fooBkt1.Filter([]string{"label2"})           // doc1, doc3
-	fooBkt1.Filter([]string{"label3"})           // doc3
-	fooBkt1.Filter([]string{"label1", "label3"}) // doc1, doc3
-	keys1 := fooBkt1.Filter([]string{})          // all: doc1, doc3
+	_, err = barBkt2.Update(ctx, "key3", &Foo{A: true, B: 3, C: "str1"})
+	if err != nil {
+		return err
+	}
 
-	// fetch docs from keys
-	// docs have the same size and indexes with keys
-	// any doc that is not found will be null in the same index with the key
-	docs1 := fooBkt1.Docs(keys1) // return CacheDoc type
-	docs1[0].Labels()            // map[string]bool{label1, label2} from doc1
+	// Add labels with error handling
+	if err := doc1.AddLabels(ctx, []string{"label1", "label2"}); err != nil {
+		return err
+	}
+	ls1, err := doc1.Labels(ctx)
+	if err != nil {
+		return err
+	}
 
-	// fetch values from keys
-	// values have the same size and indexes with keys
-	// any value that is not found will be null in the same index with the key
-	fooBkt1.Values(keys1) // return actual values of *Foo type
+	if err := doc3.AddLabels(ctx, []string{"label2", "label3"}); err != nil {
+		return err
+	}
 
-	cli.Buckets() // return all available buckets
+	// Check labels
+	_ = ls1.CheckAnd([]string{"label1", "label2"}) // true
+	_ = ls1.CheckAnd([]string{"label1", "label3"}) // false
+	_ = ls1.CheckOr([]string{"label1", "label3"})  // true
+	_ = ls1.CheckOr([]string{"label3", "label4"})  // false
 
-	// these 2 operations below are the same
+	// Search with label
+	_, err = fooBkt1.Filter(ctx, []string{"label1"})           // doc1
+	if err != nil {
+		return err
+	}
+	_, err = fooBkt1.Filter(ctx, []string{"label2"})           // doc1, doc3
+	if err != nil {
+		return err
+	}
+	_, err = fooBkt1.Filter(ctx, []string{"label3"})           // doc3
+	if err != nil {
+		return err
+	}
+	_, err = fooBkt1.Filter(ctx, []string{"label1", "label3"}) // doc1, doc3
+	if err != nil {
+		return err
+	}
+	keys1, err := fooBkt1.Filter(ctx, []string{})              // all: doc1, doc3
+	if err != nil {
+		return err
+	}
+
+	// Fetch docs from keys
+	docs1, err := fooBkt1.Docs(ctx, keys1)
+	if err != nil {
+		return err
+	}
+	if len(docs1) > 0 && docs1[0] != nil {
+		_, err = docs1[0].Labels(ctx)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Fetch values from keys
+	_, err = fooBkt1.Values(ctx, keys1)
+	if err != nil {
+		return err
+	}
+
+	_ = cli.Buckets() // return all available buckets
+
+	// These 2 operations below are equivalent
 	cli.RemoveBucket("foo1")
-	fooBkt1.Delete()
+	if err := fooBkt1.Delete(ctx); err != nil {
+		return err
+	}
 
+	return nil
 }
 
-func collectionOperations(cli model.CacheClient) {
+func collectionOperations(ctx context.Context, cli model.CacheClient) error {
 	clt1 := cli.Collection("clt1")
-	clt1.Add("key1", []string{"mem1", "mem2"})
-	clt1.Add("key1", []string{"mem2", "mem3"})
-	clt1.Add("key2", []string{"mem4", "mem5"})
-	clt1.Name()                            // return clt1
-	clt1.Keys()                            // return [key1, key2]
-	clt1.MembersMap("key1").List()         // return ["mem1", "mem2", "mem3"]
-	clt1.MembersMap("key1").Exists("mem2") // return true
-	clt1.Remove("key1", []string{"mem2"})
-	clt1.MembersMap("key1").Exists("mem2") // return false
 
-	clt1.Clear("key2") // key2 and its members will be removed from collection
-	clt1.ClearAll()    // collection is empty, without any key
+	if err := clt1.Add(ctx, "key1", []string{"mem1", "mem2"}); err != nil {
+		return err
+	}
+	if err := clt1.Add(ctx, "key1", []string{"mem2", "mem3"}); err != nil {
+		return err
+	}
+	if err := clt1.Add(ctx, "key2", []string{"mem4", "mem5"}); err != nil {
+		return err
+	}
+
+	_ = clt1.Name() // return clt1
+
+	keys, err := clt1.Keys(ctx)
+	if err != nil {
+		return err
+	}
+	log.Printf("Collection keys: %v\n", keys) // [key1, key2]
+
+	mm, err := clt1.MembersMap(ctx, "key1")
+	if err != nil {
+		return err
+	}
+	if mm != nil {
+		_ = mm.List()         // ["mem1", "mem2", "mem3"]
+		_ = mm.Exists("mem2") // true
+	}
+
+	if err := clt1.Remove(ctx, "key1", []string{"mem2"}); err != nil {
+		return err
+	}
+
+	mm, err = clt1.MembersMap(ctx, "key1")
+	if err != nil {
+		return err
+	}
+	if mm != nil {
+		_ = mm.Exists("mem2") // false
+	}
+
+	if err := clt1.Clear(ctx, "key2"); err != nil {
+		return err
+	}
+	if err := clt1.ClearAll(ctx); err != nil {
+		return err
+	}
+
+	return nil
 }

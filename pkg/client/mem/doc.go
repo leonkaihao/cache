@@ -1,6 +1,8 @@
 package mem
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -30,103 +32,210 @@ func (doc *cacheDoc[T]) Key() string {
 	return doc.key
 }
 
-func (doc *cacheDoc[T]) Val() any {
-	return doc.val
-}
-
-func (doc *cacheDoc[T]) SetValue(val any) model.CacheDoc {
-	doc.val = val
-	return doc
-}
-
-func (doc *cacheDoc[T]) SetValueWithTs(val any, ts time.Time) (model.CacheDoc, bool) {
-	if !ts.After(doc.ts) {
-		Logger.Debug("SetValueWithTs: not update because incoming time is before current time", "key", doc.key, "incoming_time", ts, "current_time", doc.ts)
-		return doc, false
+func (doc *cacheDoc[T]) Val(ctx context.Context) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
+
+	doc.RLock()
+	defer doc.RUnlock()
+
+	if doc.bucket == nil {
+		return nil, fmt.Errorf("document has been deleted")
+	}
+
+	return doc.val, nil
+}
+
+func (doc *cacheDoc[T]) SetValue(ctx context.Context, val any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	doc.Lock()
+	defer doc.Unlock()
+
+	if doc.bucket == nil {
+		return fmt.Errorf("document has been deleted")
+	}
+
+	doc.val = val
+	return nil
+}
+
+func (doc *cacheDoc[T]) SetValueWithTs(ctx context.Context, val any, ts time.Time) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	doc.Lock()
+	defer doc.Unlock()
+
+	if doc.bucket == nil {
+		return false, fmt.Errorf("document has been deleted")
+	}
+
+	if !ts.After(doc.ts) {
+		Logger.Debug("SetValueWithTs: not updated, incoming time not after current time",
+			"key", doc.key, "incoming", ts, "current", doc.ts)
+		return false, nil
+	}
+
 	doc.ts = ts
 	doc.val = val
-	return doc, true
+	return true, nil
 }
 
-func (doc *cacheDoc[T]) WithTime(tm time.Time) model.CacheDoc {
-	doc.ts = tm
-	return doc
-}
+func (doc *cacheDoc[T]) WithTime(ctx context.Context, tm time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-func (doc *cacheDoc[T]) Time() time.Time {
-	return doc.ts
-}
-
-func (doc *cacheDoc[T]) Labels() model.LabelSet {
-	return model.LabelSet(doc.labels).Copy()
-}
-
-func (doc *cacheDoc[T]) AddLabels(labelsOrig []string) model.LabelSet {
-	var result model.LabelSet
 	doc.Lock()
-	labels := []string{}
+	defer doc.Unlock()
+
+	if doc.bucket == nil {
+		return fmt.Errorf("document has been deleted")
+	}
+
+	doc.ts = tm
+	return nil
+}
+
+func (doc *cacheDoc[T]) Time(ctx context.Context) (time.Time, error) {
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
+
+	doc.RLock()
+	defer doc.RUnlock()
+
+	if doc.bucket == nil {
+		return time.Time{}, fmt.Errorf("document has been deleted")
+	}
+
+	return doc.ts, nil
+}
+
+func (doc *cacheDoc[T]) Labels(ctx context.Context) (model.LabelSet, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	doc.RLock()
+	defer doc.RUnlock()
+
+	if doc.bucket == nil {
+		return nil, fmt.Errorf("document has been deleted")
+	}
+
+	return model.LabelSet(doc.labels).Copy(), nil
+}
+
+func (doc *cacheDoc[T]) AddLabels(ctx context.Context, labelsOrig []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	doc.Lock()
+	if doc.bucket == nil {
+		doc.Unlock()
+		return fmt.Errorf("cannot add labels to deleted document")
+	}
+
+	validLabels := make([]string, 0, len(labelsOrig))
 	for _, label := range labelsOrig {
 		if label == "" {
 			continue
 		}
 		doc.labels[label] = true
-		labels = append(labels, label)
+		validLabels = append(validLabels, label)
 	}
-	result = model.LabelSet(doc.labels).Copy()
 	doc.Unlock()
-	if doc.bucket != nil {
-		doc.bucket.addLabels(doc.key, labels)
+
+	if doc.bucket != nil && len(validLabels) > 0 {
+		doc.bucket.addLabels(doc.key, validLabels)
 	}
-	return result
+
+	return nil
 }
 
-func (doc *cacheDoc[T]) RemoveLabels(labelsOrig []string) model.LabelSet {
-	var result model.LabelSet
+func (doc *cacheDoc[T]) RemoveLabels(ctx context.Context, labelsOrig []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	doc.Lock()
-	labels := []string{}
+	if doc.bucket == nil {
+		doc.Unlock()
+		return fmt.Errorf("cannot remove labels from deleted document")
+	}
+
+	validLabels := make([]string, 0, len(labelsOrig))
 	for _, label := range labelsOrig {
 		if label == "" {
 			continue
 		}
 		delete(doc.labels, label)
-		labels = append(labels, label)
+		validLabels = append(validLabels, label)
 	}
-	result = model.LabelSet(doc.labels).Copy()
 	doc.Unlock()
-	if doc.bucket != nil {
-		doc.bucket.removeLabels(doc.key, labels)
+
+	if doc.bucket != nil && len(validLabels) > 0 {
+		doc.bucket.removeLabels(doc.key, validLabels)
 	}
-	return result
+
+	return nil
 }
 
-func (doc *cacheDoc[T]) Delete() {
+func (doc *cacheDoc[T]) Delete(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	doc.Lock()
+
+	// Stop expiration timer
 	if doc.expirer != nil {
 		doc.expirer.Stop()
 		doc.expirer = nil
 	}
+
 	if doc.bucket == nil {
 		doc.Unlock()
-		return
+		return fmt.Errorf("document already deleted")
 	}
-	labels := []string{}
+
+	// Collect labels while holding lock
+	labels := make([]string, 0, len(doc.labels))
 	for k := range doc.labels {
 		labels = append(labels, k)
 	}
+
 	bucket := doc.bucket
-	doc.bucket = nil
+	doc.bucket = nil // Mark as deleted BEFORE unlock
 	doc.Unlock()
-	bucket.removeLabels(doc.key, labels)
-	bucket.Remove([]string{doc.key})
+
+	// Clean up in bucket (has its own locks)
+	if len(labels) > 0 {
+		bucket.removeLabels(doc.key, labels)
+	}
+	return bucket.Remove(ctx, []string{doc.key})
 }
 
-func (doc *cacheDoc[T]) Expire(d time.Duration, onExpire func(model.CacheDoc)) {
+func (doc *cacheDoc[T]) Expire(d time.Duration, onExpire func(model.CacheDoc)) error {
 	doc.Lock()
+	defer doc.Unlock()
+
+	if doc.bucket == nil {
+		return fmt.Errorf("cannot set expiration on deleted document")
+	}
+
+	// Stop existing timer if any
 	if doc.expirer != nil {
 		doc.expirer.Stop()
-		doc.expirer = nil
 	}
+
 	doc.expirer = time.AfterFunc(d, func() {
 		if onExpire != nil {
 			onExpire(doc)
@@ -135,5 +244,18 @@ func (doc *cacheDoc[T]) Expire(d time.Duration, onExpire func(model.CacheDoc)) {
 		doc.expirer = nil
 		doc.Unlock()
 	})
-	doc.Unlock()
+
+	return nil
+}
+
+func (doc *cacheDoc[T]) CancelExpire() error {
+	doc.Lock()
+	defer doc.Unlock()
+
+	if doc.expirer != nil {
+		doc.expirer.Stop()
+		doc.expirer = nil
+	}
+
+	return nil
 }

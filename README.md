@@ -13,16 +13,18 @@ A flexible and type-safe caching library for Go with support for both in-memory 
 
 - **Multiple Backend Support**: In-memory cache and Redis cache implementations
 - **Type-Safe API**: Generic-based bucket operations for type safety
+- **Context Support**: Full context.Context integration for cancellation and timeouts
+- **Production-Safe Error Handling**: All operations return errors instead of panicking
 - **Label-Based Filtering**: Organize and query cached items using labels
 - **Time-Based Updates**: Conditional updates based on timestamps
 - **Expiration Support**: Built-in TTL and expiration callbacks
 - **Collections**: Manage sets of members associated with keys
-- **Extensible Logger**: Custom logging interface for integration with your logging framework
+- **Configurable Timeouts**: Per-client timeout configuration for Redis operations
 
 ## Installation
 
 ```bash
-go get github.com/leonkaihao/cache
+go get github.com/leonkaihao/cache@v2
 ```
 
 ## Quick Start
@@ -33,9 +35,10 @@ go get github.com/leonkaihao/cache
 package main
 
 import (
+    "context"
+    "log"
     "time"
     cache "github.com/leonkaihao/cache/pkg/client/mem"
-    "github.com/leonkaihao/cache/pkg/model"
 )
 
 type User struct {
@@ -45,22 +48,41 @@ type User struct {
 }
 
 func main() {
+    ctx := context.Background()
+    
     // Create client
     cli := cache.NewClient()
     
-    // Create bucket
-    userBkt := cache.NewBucket[User](cli, "users")
+    // Create bucket with error handling
+    userBkt, err := cache.NewBucket[User](cli, "users")
+    if err != nil {
+        log.Fatal(err)
+    }
     cli.WithBucket(userBkt)
     
-    // Update/insert document
-    doc := userBkt.Update("user1", &User{ID: 1, Name: "Alice", Age: 30})
+    // Update/insert document with context
+    doc, err := userBkt.Update(ctx, "user1", &User{ID: 1, Name: "Alice", Age: 30})
+    if err != nil {
+        log.Fatal(err)
+    }
     
     // Add labels
-    doc.AddLabels([]string{"active", "premium"})
+    if err := doc.AddLabels(ctx, []string{"active", "premium"}); err != nil {
+        log.Fatal(err)
+    }
     
     // Filter by labels
-    keys := userBkt.Filter([]string{"active"})
-    users := userBkt.Values(keys) // Get actual User values
+    keys, err := userBkt.Filter(ctx, []string{"active"})
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    // Get actual User values
+    users, err := userBkt.Values(ctx, keys)
+    if err != nil {
+        log.Fatal(err)
+    }
+    log.Printf("Found %d active users\n", len(users))
 }
 ```
 
@@ -71,8 +93,10 @@ package main
 
 import (
     "context"
+    "log"
+    "time"
     cache "github.com/leonkaihao/cache/pkg/client/redis"
-    "github.com/redis/go-redis/v9"
+    "github.com/leonkaihao/cache/pkg/coding"
 )
 
 type Product struct {
@@ -82,28 +106,68 @@ type Product struct {
 }
 
 func main() {
-    // Create Redis client
-    redisClient := redis.NewClient(&redis.Options{
-        Addr: "localhost:6379",
-    })
+    ctx := context.Background()
     
-    cli := cache.NewClient(context.Background(), redisClient)
+    // Create Redis client with custom timeout
+    cli := cache.NewClient(
+        "localhost:6379", 
+        "password", 
+        0,
+        cache.WithTimeout(5*time.Second), // optional: custom timeout
+    )
     
-    // Create bucket with encoding
-    productBkt := cache.NewBucket[Product](
+    // Create bucket with error handling
+    productBkt, err := cache.NewBucket[Product](
         cli, 
         "products",
-        cache.WithJsonEncoding[Product](),
+        coding.NewJsonCoder(),
     )
+    if err != nil {
+        log.Fatal(err)
+    }
     cli.WithBucket(productBkt)
     
-    // Update document
-    doc := productBkt.Update("prod1", &Product{
+    // Update document with context
+    doc, err := productBkt.Update(ctx, "prod1", &Product{
         ID:    "p001",
         Name:  "Laptop",
         Price: 999.99,
     })
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    log.Printf("Created product: %s\n", doc.Key())
 }
+```
+
+## Context and Timeout Management
+
+All operations accept a `context.Context` for cancellation and timeouts:
+
+```go
+ctx := context.Background()
+
+// Use context with timeout
+ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+defer cancel()
+
+doc, err := bucket.Update(ctx, "key1", data)
+if err != nil {
+    // Handle timeout or cancellation
+    log.Printf("Operation failed: %v", err)
+}
+
+// Redis client has default timeout (1 second)
+// You can customize it:
+cli := cache.NewClient("localhost:6379", "pass", 0, 
+    cache.WithTimeout(5*time.Second))
+
+// Context deadline takes precedence over default timeout
+// If context has shorter deadline, it will be used
+shortCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+defer cancel()
+_, err = bucket.Update(shortCtx, "key", data) // Uses 100ms timeout
 ```
 
 ## API Overview
@@ -127,20 +191,20 @@ type CacheClient interface {
 
 ### CacheBucket
 
-Type-safe storage for cached objects:
+Type-safe storage for cached objects (all methods accept context and return errors):
 
 ```go
 type CacheBucket interface {
     Name() string
-    Docs(keys []string) []CacheDoc
-    Values(keys []string) []any
-    Update(key string, data any) CacheDoc
-    UpdateWithTs(key string, data any, ts time.Time) (CacheDoc, bool)
-    Filter(labelFilters ...[]string) []string
-    Scan(match string) []string
-    Remove(keys []string) []CacheDoc
-    Clear()
-    Delete()
+    Docs(ctx context.Context, keys []string) ([]CacheDoc, error)
+    Values(ctx context.Context, keys []string) ([]any, error)
+    Update(ctx context.Context, key string, data any) (CacheDoc, error)
+    UpdateWithTs(ctx context.Context, key string, data any, ts time.Time) (CacheDoc, bool, error)
+    Filter(ctx context.Context, labelFilters ...[]string) ([]string, error)
+    Scan(ctx context.Context, match string) ([]string, error)
+    Remove(ctx context.Context, keys []string) error
+    Clear(ctx context.Context) error
+    Delete(ctx context.Context) error
 }
 ```
 
@@ -151,16 +215,17 @@ Individual cached document with metadata:
 ```go
 type CacheDoc interface {
     Key() string
-    Val() any
-    SetValue(val any) CacheDoc
-    Labels() LabelSet
-    AddLabels(labels []string) LabelSet
-    RemoveLabels(label []string) LabelSet
-    Delete()
-    WithTime(ts time.Time) CacheDoc
-    SetValueWithTs(val any, ts time.Time) (CacheDoc, bool)
-    Time() time.Time
-    Expire(d time.Duration, onExpire func(CacheDoc))
+    Val(ctx context.Context) (any, error)
+    SetValue(ctx context.Context, val any) error
+    Labels(ctx context.Context) (LabelSet, error)
+    AddLabels(ctx context.Context, labels []string) error
+    RemoveLabels(ctx context.Context, labels []string) error
+    Delete(ctx context.Context) error
+    WithTime(ctx context.Context, ts time.Time) error
+    SetValueWithTs(ctx context.Context, val any, ts time.Time) (bool, error)
+    Time(ctx context.Context) (time.Time, error)
+    Expire(d time.Duration, onExpire func(CacheDoc)) error
+    CancelExpire() error
 }
 ```
 
@@ -171,13 +236,14 @@ Manage sets of members:
 ```go
 type CacheCollection interface {
     Name() string
-    Keys() []string
-    Add(key string, members []string)
-    Remove(key string, members []string)
-    MembersMap(key string) MemberSet
-    Clear(key string)
-    ClearAll()
-    Delete()
+    Keys(ctx context.Context) ([]string, error)
+    Add(ctx context.Context, key string, members []string) error
+    Remove(ctx context.Context, key string, members []string) error
+    MembersMap(ctx context.Context, key string) (MembersMap, error)
+    MembersMaps(ctx context.Context, keys []string) ([]MembersMap, error)
+    Clear(ctx context.Context, key string) error
+    ClearAll(ctx context.Context) error
+    Delete(ctx context.Context) error
 }
 ```
 
@@ -185,60 +251,216 @@ type CacheCollection interface {
 
 ### Time-Based Updates
 
-Only update cache if the new data is newer:
+Only update cache if the new data is newer (equal timestamps are rejected):
 
 ```go
-doc, updated := bucket.UpdateWithTs("key1", data, time.Now())
-if updated {
-    // Data was updated because timestamp was newer
+ctx := context.Background()
+ts := time.Now()
+
+// First update
+doc, updated, err := bucket.UpdateWithTs(ctx, "key1", data, ts)
+if err != nil {
+    log.Fatal(err)
 }
+log.Printf("Updated: %v", updated) // true
+
+// Try to update with same timestamp (rejected)
+_, updated, err = bucket.UpdateWithTs(ctx, "key1", newData, ts)
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("Updated: %v", updated) // false - equal timestamp rejected
+
+// Update with newer timestamp (succeeds)
+newerTs := ts.Add(time.Second)
+_, updated, err = bucket.UpdateWithTs(ctx, "key1", newerData, newerTs)
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("Updated: %v", updated) // true
 ```
 
 ### Expiration with Callbacks
 
 ```go
-doc := bucket.Update("session", sessionData)
-doc.Expire(time.Hour, func(d model.CacheDoc) {
+ctx := context.Background()
+
+doc, err := bucket.Update(ctx, "session", sessionData)
+if err != nil {
+    log.Fatal(err)
+}
+
+err = doc.Expire(time.Hour, func(d model.CacheDoc) {
     log.Printf("Session expired: %s", d.Key())
-    d.Delete()
+    _ = d.Delete(context.Background())
 })
+if err != nil {
+    log.Fatal(err)
+}
+
+// Cancel expiration if needed
+err = doc.CancelExpire()
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### Label-Based Filtering
 
 ```go
+ctx := context.Background()
+
 // Add labels
-doc1.AddLabels([]string{"active", "premium"})
-doc2.AddLabels([]string{"active", "free"})
+if err := doc1.AddLabels(ctx, []string{"active", "premium"}); err != nil {
+    log.Fatal(err)
+}
+if err := doc2.AddLabels(ctx, []string{"active", "free"}); err != nil {
+    log.Fatal(err)
+}
 
 // Filter by single label
-activeKeys := bucket.Filter([]string{"active"}) // Returns both doc1 and doc2
+activeKeys, err := bucket.Filter(ctx, []string{"active"})
+if err != nil {
+    log.Fatal(err)
+}
+// Returns both doc1 and doc2
 
-// Filter by multiple labels (OR logic)
-premiumKeys := bucket.Filter([]string{"premium", "free"}) // Returns doc1 and doc2
+// Filter by multiple labels (OR within array, AND between arrays)
+premiumKeys, err := bucket.Filter(ctx, []string{"premium", "free"})
+if err != nil {
+    log.Fatal(err)
+}
+// Returns doc1 and doc2
 
 // Check labels
-labels := doc1.Labels()
-labels.CheckAnd([]string{"active", "premium"}) // true
-labels.CheckOr([]string{"active", "trial"})    // true
+labels, err := doc1.Labels(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+hasActive := labels.CheckAnd([]string{"active", "premium"}) // true
+hasTrial := labels.CheckOr([]string{"active", "trial"})    // true
 ```
 
 ### Collections for Set Operations
 
 ```go
+ctx := context.Background()
 clt := cli.Collection("user_groups")
 
-// Add members to sets
-clt.Add("admins", []string{"user1", "user2"})
-clt.Add("admins", []string{"user2", "user3"}) // Merges with existing
+// Add members to sets (empty members rejected)
+if err := clt.Add(ctx, "admins", []string{"user1", "user2"}); err != nil {
+    log.Fatal(err)
+}
+// Merges with existing
+if err := clt.Add(ctx, "admins", []string{"user2", "user3"}); err != nil {
+    log.Fatal(err)
+}
 
 // Check membership
-members := clt.MembersMap("admins")
-members.Exists("user1") // true
-members.List()          // ["user1", "user2", "user3"]
+members, err := clt.MembersMap(ctx, "admins")
+if err != nil {
+    log.Fatal(err)
+}
+if members != nil {
+    exists := members.Exists("user1") // true
+    list := members.List()            // ["user1", "user2", "user3"]
+}
 
 // Remove members
-clt.Remove("admins", []string{"user2"})
+if err := clt.Remove(ctx, "admins", []string{"user2"}); err != nil {
+    log.Fatal(err)
+}
+```
+
+## Error Handling Philosophy
+
+**v2.0.0 is production-safe**: All operations return errors instead of panicking or using `Logger.Fatal()`. This allows your application to:
+
+1. **Gracefully handle failures** - No unexpected crashes
+2. **Implement retry logic** - Wrap operations in your own retry mechanism
+3. **Log errors appropriately** - Use your application's logging system
+4. **Test error paths** - Write tests that verify error handling
+
+```go
+ctx := context.Background()
+
+// Always check errors
+doc, err := bucket.Update(ctx, "key1", data)
+if err != nil {
+    // Handle error appropriately
+    log.Printf("Failed to update cache: %v", err)
+    // Optionally retry, use fallback, or propagate error
+    return fmt.Errorf("cache update failed: %w", err)
+}
+
+// Context cancellation is detected
+ctx, cancel := context.WithCancel(context.Background())
+cancel() // Cancel immediately
+
+err = doc.AddLabels(ctx, []string{"label1"})
+if errors.Is(err, context.Canceled) {
+    log.Println("Operation was cancelled")
+}
+```
+
+## Migration Guide (v1.x → v2.0.0)
+
+### Breaking Changes
+
+1. **All operations now accept `context.Context` as first parameter**
+2. **All operations now return `error`**
+3. **`SetValueWithTs` returns `(bool, error)` instead of `(CacheDoc, bool)`**
+4. **`UpdateWithTs` returns `(CacheDoc, bool, error)` instead of `(CacheDoc, bool)`**
+5. **`Remove` returns `error` instead of `[]CacheDoc`**
+6. **`GetLastErrors()` removed** - errors are returned directly
+7. **Empty members in `Collection.Add()` now rejected**
+8. **Redis client accepts `WithTimeout()` option**
+9. **NewBucket returns `(CacheBucket, error)` for both backends**
+
+### Migration Examples
+
+#### Before (v1.x):
+```go
+cli := mem.NewClient()
+bucket := mem.NewBucket[User](cli, "users")
+doc := bucket.Update("key1", data)
+doc.AddLabels([]string{"active"})
+keys := bucket.Filter([]string{"active"})
+bucket.Clear()
+```
+
+#### After (v2.0.0):
+```go
+ctx := context.Background()
+cli := mem.NewClient()
+bucket, err := mem.NewBucket[User](cli, "users")
+if err != nil {
+    return err
+}
+doc, err := bucket.Update(ctx, "key1", data)
+if err != nil {
+    return err
+}
+if err := doc.AddLabels(ctx, []string{"active"}); err != nil {
+    return err
+}
+keys, err := bucket.Filter(ctx, []string{"active"})
+if err != nil {
+    return err
+}
+if err := bucket.Clear(ctx); err != nil {
+    return err
+}
+```
+
+#### Redis Timeout Configuration:
+```go
+// Before (v1.x): No timeout configuration
+cli := redis.NewClient("localhost:6379", "pass", 0)
+
+// After (v2.0.0): Optional timeout configuration
+cli := redis.NewClient("localhost:6379", "pass", 0, 
+    redis.WithTimeout(5*time.Second)) // default is 1s
 ```
 
 ## Testing
@@ -252,6 +474,9 @@ make test/integration
 
 # Run benchmarks
 make test/bench
+
+# Run specific test
+go test ./pkg/client/mem/... -run TestBucket -v
 ```
 
 ## Project Structure
@@ -264,7 +489,8 @@ cache/
 ├── pkg/
 │   ├── client/
 │   │   ├── mem/         # In-memory implementation
-│   │   └── redis/       # Redis implementation
+│   │   ├── redis/       # Redis implementation
+│   │   └── test/        # Shared test suite
 │   ├── model/           # Core interfaces
 │   ├── coding/          # Encoding/decoding utilities
 │   ├── consts/          # Constants
@@ -281,6 +507,7 @@ cache/
 
 - [go-redis/v9](https://github.com/redis/go-redis) - Redis client for Go
 - [protobuf](https://github.com/golang/protobuf) - Protocol buffer support
+- [testify](https://github.com/stretchr/testify) - Testing toolkit
 
 ## Contributing
 
@@ -294,5 +521,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 Full examples can be found in the `cmd/` directory:
 
-- [`cmd/sample-mem/main.go`](cmd/sample-mem/main.go) - In-memory cache usage
-- [`cmd/sample-redis/main.go`](cmd/sample-redis/main.go) - Redis cache usage
+- [`cmd/sample-mem/main.go`](cmd/sample-mem/main.go) - In-memory cache usage with context and error handling
+- [`cmd/sample-redis/main.go`](cmd/sample-redis/main.go) - Redis cache usage with timeout configuration
