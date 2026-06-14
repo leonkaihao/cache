@@ -60,6 +60,10 @@ func main() {
 		log.Fatalf("Collection operations failed: %v", err)
 	}
 
+	if err := timelineOperations(ctx, cli); err != nil {
+		log.Fatalf("Timeline operations failed: %v", err)
+	}
+
 	log.Println("All operations completed successfully!")
 }
 
@@ -217,6 +221,95 @@ func collectionOperations(ctx context.Context, cli model.CacheClient) error {
 	if err := clt1.ClearAll(ctx); err != nil {
 		return err
 	}
+
+	return nil
+}
+
+func timelineOperations(ctx context.Context, cli model.CacheClient) error {
+	// Create timeline
+	timeline := cli.Timeline("device_states")
+
+	// Set retention policy: keep last 100 updates or 2 hours
+	if err := timeline.SetRetention(model.RetentionPolicy{
+		MaxCount:    100,
+		MaxDuration: 2 * time.Hour,
+		Strategy:    model.RetentionMax,
+	}); err != nil {
+		return err
+	}
+
+	// Record device state at different timestamps
+	now := time.Now()
+	
+	// Initial state
+	if err := timeline.Append(ctx, "device_A", now, map[string]string{
+		"zones":   "Z1,Z3",
+		"beacons": "B5",
+		"battery": "85",
+	}, false); err != nil {
+		return err
+	}
+
+	// Update zones only (sparse update)
+	if err := timeline.Append(ctx, "device_A", now.Add(5*time.Minute), map[string]string{
+		"zones": "Z1,Z3,Z5",
+	}, false); err != nil {
+		return err
+	}
+
+	// Update battery only
+	if err := timeline.Append(ctx, "device_A", now.Add(10*time.Minute), map[string]string{
+		"battery": "82",
+	}, false); err != nil {
+		return err
+	}
+
+	// Query current state (merged from all updates)
+	state, err := timeline.GetLatest(ctx, "device_A")
+	if err != nil {
+		return err
+	}
+	log.Printf("Latest state: zones=%s, beacons=%s, battery=%s\n", 
+		state["zones"], state["beacons"], state["battery"])
+	// Output: zones=Z1,Z3,Z5, beacons=B5, battery=82
+
+	// Query historical state
+	historicalState, err := timeline.GetAt(ctx, "device_A", now.Add(7*time.Minute))
+	if err != nil {
+		return err
+	}
+	log.Printf("State at +7min: zones=%s, beacons=%s, battery=%s\n",
+		historicalState["zones"], historicalState["beacons"], historicalState["battery"])
+	// Output: zones=Z1,Z3,Z5, beacons=B5, battery=85
+
+	// Insert out-of-order event
+	lateEvent := now.Add(2 * time.Minute)
+	if err := timeline.Insert(ctx, "device_A", lateEvent, map[string]string{
+		"zones": "Z1,Z2",
+	}, false); err != nil {
+		return err
+	}
+
+	// Find affected states after historical insertion
+	affected, err := timeline.GetAffectedRange(ctx, "device_A", lateEvent)
+	if err != nil {
+		return err
+	}
+	log.Printf("Affected states after late event: %d states need recomputation\n", len(affected))
+
+	// Get timeline of all states
+	allStates, err := timeline.Timeline(ctx, "device_A")
+	if err != nil {
+		return err
+	}
+	log.Printf("Total timeline points: %d\n", len(allStates))
+
+	// List all keys in timeline
+	keys, err := timeline.Keys(ctx)
+	if err != nil {
+		return err
+	}
+	log.Printf("Timeline keys: %v\n", keys)
 
 	return nil
 }

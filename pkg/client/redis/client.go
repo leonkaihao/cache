@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"sync"
 	"time"
 
 	redis "github.com/redis/go-redis/v9"
@@ -19,7 +20,9 @@ type client struct {
 	rc             *redis.Client
 	bkts           map[string]model.CacheBucket
 	collections    map[string]model.CacheCollection
+	timelines      map[string]model.CacheTimeline
 	defaultTimeout time.Duration
+	mu             sync.Mutex
 }
 
 func NewClient(url, pass string, dbIndex int, opts ...ClientOption) model.CacheClient {
@@ -27,6 +30,7 @@ func NewClient(url, pass string, dbIndex int, opts ...ClientOption) model.CacheC
 		rc:             redis.NewClient(&redis.Options{Addr: url, Password: pass, DB: dbIndex}),
 		bkts:           make(map[string]model.CacheBucket),
 		collections:    make(map[string]model.CacheCollection),
+		timelines:      make(map[string]model.CacheTimeline),
 		defaultTimeout: time.Second, // Default timeout
 	}
 	for _, opt := range opts {
@@ -86,4 +90,40 @@ func (cli *client) Collections() []model.CacheCollection {
 
 func (cli *client) RemoveCollection(name string) {
 	delete(cli.collections, name)
+}
+
+func (cli *client) Timeline(name string) model.CacheTimeline {
+	cli.mu.Lock()
+	defer cli.mu.Unlock()
+
+	tl, ok := cli.timelines[name]
+	if !ok {
+		tl = &redisTimeline{
+			name:          name,
+			cli:           cli,
+			retention:     model.RetentionPolicy{Strategy: model.RetentionMax},
+			keyRetentions: make(map[string]model.RetentionPolicy),
+		}
+		cli.timelines[name] = tl
+	}
+	return tl
+}
+
+func (cli *client) Timelines() []model.CacheTimeline {
+	cli.mu.Lock()
+	defer cli.mu.Unlock()
+
+	result := make([]model.CacheTimeline, 0, len(cli.timelines))
+	for _, tl := range cli.timelines {
+		result = append(result, tl)
+	}
+	return result
+}
+
+func (cli *client) RemoveTimeline(name string) error {
+	cli.mu.Lock()
+	defer cli.mu.Unlock()
+
+	delete(cli.timelines, name)
+	return nil
 }

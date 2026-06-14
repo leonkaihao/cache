@@ -1,12 +1,16 @@
 package mem
 
 import (
+	"sync"
+
 	"github.com/leonkaihao/cache/pkg/model"
 )
 
 type client struct {
 	bkts        map[string]model.CacheBucket
 	collections map[string]model.CacheCollection
+	timelines   map[string]model.CacheTimeline
+	mu          sync.Mutex
 }
 
 func NewClient() model.CacheClient {
@@ -14,6 +18,7 @@ func NewClient() model.CacheClient {
 	return &client{
 		bkts:        make(map[string]model.CacheBucket),
 		collections: make(map[string]model.CacheCollection),
+		timelines:   make(map[string]model.CacheTimeline),
 	}
 }
 
@@ -63,4 +68,41 @@ func (cli *client) Collections() []model.CacheCollection {
 
 func (cli *client) RemoveCollection(name string) {
 	delete(cli.collections, name)
+}
+
+func (cli *client) Timeline(name string) model.CacheTimeline {
+	cli.mu.Lock()
+	defer cli.mu.Unlock()
+
+	tl, ok := cli.timelines[name]
+	if !ok {
+		tl = &memTimeline{
+			name:          name,
+			data:          make(map[string]*timelineData),
+			retention:     model.RetentionPolicy{Strategy: model.RetentionMax},
+			keyRetentions: make(map[string]model.RetentionPolicy),
+			client:        cli,
+		}
+		cli.timelines[name] = tl
+	}
+	return tl
+}
+
+func (cli *client) Timelines() []model.CacheTimeline {
+	cli.mu.Lock()
+	defer cli.mu.Unlock()
+
+	result := make([]model.CacheTimeline, 0, len(cli.timelines))
+	for _, tl := range cli.timelines {
+		result = append(result, tl)
+	}
+	return result
+}
+
+func (cli *client) RemoveTimeline(name string) error {
+	cli.mu.Lock()
+	defer cli.mu.Unlock()
+
+	delete(cli.timelines, name)
+	return nil
 }

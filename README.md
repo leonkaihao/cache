@@ -19,6 +19,7 @@ A flexible and type-safe caching library for Go with support for both in-memory 
 - **Time-Based Updates**: Conditional updates based on timestamps
 - **Expiration Support**: Built-in TTL and expiration callbacks
 - **Collections**: Manage sets of members associated with keys
+- **Timeline**: Time-indexed state storage with sparse field updates and out-of-order insertion support
 - **Configurable Timeouts**: Per-client timeout configuration for Redis operations
 
 ## Installation
@@ -56,34 +57,72 @@ func main() {
     // Create bucket with error handling
     userBkt, err := cache.NewBucket[User](cli, "users")
     if err != nil {
-        log.Fatal(err)
-    }
-    cli.WithBucket(userBkt)
-    
-    // Update/insert document with context
-    doc, err := userBkt.Update(ctx, "user1", &User{ID: 1, Name: "Alice", Age: 30})
-    if err != nil {
-        log.Fatal(err)
-    }
-    
-    // Add labels
-    if err := doc.AddLabels(ctx, []string{"active", "premium"}); err != nil {
-        log.Fatal(err)
-    }
-    
-    // Filter by labels
-    keys, err := userBkt.Filter(ctx, []string{"active"})
-    if err != nil {
-        log.Fatal(err)
-    }
-    
-    // Get actual User values
-    users, err := userBkt.Values(ctx, keys)
-    if err != nil {
-        log.Fatal(err)
-    }
-    log.Printf("Found %d active users\n", len(users))
+    log.Fatal(err)
 }
+```
+
+### Timeline for Time-Series State Management
+
+```go
+ctx := context.Background()
+
+// Create timeline
+timeline := cli.Timeline("device_states")
+
+// Set retention policy
+if err := timeline.SetRetention(model.RetentionPolicy{
+    MaxCount:    100,
+    MaxDuration: 2 * time.Hour,
+    Strategy:    model.RetentionMax,
+}); err != nil {
+    log.Fatal(err)
+}
+
+// Record device state
+if err := timeline.Append(ctx, "device_A", time.Now(), map[string]string{
+    "zones":   "Z1,Z3",
+    "beacons": "B5",
+    "battery": "85",
+}, false); err != nil {
+    log.Fatal(err)
+}
+
+// Sparse update (only zones changed)
+if err := timeline.Append(ctx, "device_A", time.Now().Add(5*time.Minute), map[string]string{
+    "zones": "Z1,Z3,Z5",
+}, false); err != nil {
+    log.Fatal(err)
+}
+
+// Query current state (merged from all updates)
+state, err := timeline.GetLatest(ctx, "device_A")
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("Current state: zones=%s, beacons=%s, battery=%s\n",
+    state["zones"], state["beacons"], state["battery"])
+// Output: zones=Z1,Z3,Z5, beacons=B5, battery=85
+
+// Query historical state
+historicalState, err := timeline.GetAt(ctx, "device_A", time.Now().Add(-10*time.Minute))
+if err != nil {
+    log.Fatal(err)
+}
+
+// Insert out-of-order event
+lateEvent := time.Now().Add(-1 * time.Hour)
+if err := timeline.Insert(ctx, "device_A", lateEvent, map[string]string{
+    "zones": "Z1,Z2",
+}, false); err != nil {
+    log.Fatal(err)
+}
+
+// Find affected states for recomputation
+affected, err := timeline.GetAffectedRange(ctx, "device_A", lateEvent)
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("States needing recomputation: %d\n", len(affected))
 ```
 
 ### Redis Cache
@@ -186,6 +225,10 @@ type CacheClient interface {
     Collection(name string) CacheCollection
     Collections() []CacheCollection
     RemoveCollection(name string)
+    
+    Timeline(name string) CacheTimeline
+    Timelines() []CacheTimeline
+    RemoveTimeline(name string) error
 }
 ```
 
@@ -243,6 +286,40 @@ type CacheCollection interface {
     MembersMaps(ctx context.Context, keys []string) ([]MembersMap, error)
     Clear(ctx context.Context, key string) error
     ClearAll(ctx context.Context) error
+    Delete(ctx context.Context) error
+}
+```
+
+### CacheTimeline
+
+Time-indexed state storage for managing historical data:
+
+```go
+type CacheTimeline interface {
+    Name() string
+    
+    // Write operations
+    Append(ctx context.Context, key string, ts time.Time, data map[string]string, force bool) error
+    Insert(ctx context.Context, key string, ts time.Time, data map[string]string, force bool) error
+    
+    // Query operations
+    GetAt(ctx context.Context, key string, ts time.Time) (map[string]string, error)
+    GetExact(ctx context.Context, key string, ts time.Time) (map[string]string, error)
+    GetRange(ctx context.Context, key string, start, end time.Time) ([]TimeValue, error)
+    GetLatest(ctx context.Context, key string) (map[string]string, error)
+    Timeline(ctx context.Context, key string) ([]TimeValue, error)
+    GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]TimeValue, error)
+    
+    // Retention management
+    SetRetention(policy RetentionPolicy) error
+    SetKeyRetention(key string, policy RetentionPolicy) error
+    GetRetention() RetentionPolicy
+    GetKeyRetention(key string) RetentionPolicy
+    
+    // Management
+    Keys(ctx context.Context) ([]string, error)
+    Remove(ctx context.Context, keys []string) error
+    Clear(ctx context.Context) error
     Delete(ctx context.Context) error
 }
 ```

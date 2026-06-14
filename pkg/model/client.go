@@ -9,4 +9,8 @@ type CacheClient interface {
 	Collection(name string) CacheCollection
 	Collections() []CacheCollection
 	RemoveCollection(name string)
+
+	Timeline(name string) CacheTimeline
+	Timelines() []CacheTimeline
+	RemoveTimeline(name string) error
 }

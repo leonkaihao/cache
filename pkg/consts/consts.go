@@ -2,8 +2,11 @@ package consts
 
 // format keys in Redis cache
 const (
-	BUCKET_PREFIX = "B@"
-	CLT_PREFIX    = "C@"
-	LABELS_PREFIX = "L/"
-	KEYS_PREFIX   = "K/"
+	BUCKET_PREFIX    = "B@"
+	CLT_PREFIX       = "C@"
+	TIMELINE_PREFIX  = "T@"
+	LABELS_PREFIX    = "L/"
+	KEYS_PREFIX      = "K/"
+	TS_PREFIX        = "TS/"
+	RETENTION_PREFIX = "R/"
 )
