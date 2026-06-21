@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	redis "github.com/redis/go-redis/v9"
 	"github.com/leonkaihao/cache/pkg/consts"
 	"github.com/leonkaihao/cache/pkg/model"
+	redis "github.com/redis/go-redis/v9"
 )
 
 // redisTimeline implements the CacheTimeline interface using Redis backend.
@@ -146,38 +146,91 @@ func (t *redisTimeline) GetAt(ctx context.Context, keys []string, ts time.Time) 
 	results := make([]map[string]string, len(keys))
 	be := model.NewBatchError(len(keys))
 
+	// Phase 1: Pipeline all ZRangeArgs commands to fetch timestamps ≤ ts
+	pipe := redisCli.Pipeline()
+	zrangeCmds := make([]*redis.StringSliceCmd, len(keys))
 	for i, key := range keys {
 		tsKey := formatTimelineTS(t.name, key)
-		timestamps, err := redisCli.ZRangeArgs(ctx, redis.ZRangeArgs{
+		zrangeCmds[i] = pipe.ZRangeArgs(ctx, redis.ZRangeArgs{
 			Key:     tsKey,
 			Start:   "-inf",
 			Stop:    fmt.Sprintf("%d", tsMicros),
 			ByScore: true,
-		}).Result()
-		if err != nil {
-			be.Add(key, fmt.Errorf("failed to query timestamps: %w", err))
+		})
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		// Pipeline execution failed, but individual commands may have succeeded
+	}
+
+	// Phase 2: Collect timestamp results and build flat list of HGetAll operations
+	type hgetSpec struct {
+		keyIdx int
+		tsStr  string
+	}
+	var hgetSpecs []hgetSpec
+
+	for i, cmd := range zrangeCmds {
+		timestamps, err := cmd.Result()
+		if err != nil && err != redis.Nil {
+			be.Add(keys[i], fmt.Errorf("failed to query timestamps: %w", err))
 			continue
 		}
 		if len(timestamps) == 0 {
 			results[i] = nil
 			continue
 		}
-		merged := make(map[string]string)
-		fetchErr := false
+		// Add all HGetAll operations needed for this key
 		for _, tsStr := range timestamps {
-			dataKey := formatTimelineData(t.name, key, mustParseInt64(tsStr))
-			fields, err := redisCli.HGetAll(ctx, dataKey).Result()
-			if err != nil {
-				be.Add(key, fmt.Errorf("failed to get data at %s: %w", tsStr, err))
-				fetchErr = true
-				break
-			}
-			for k, v := range fields {
-				merged[k] = v
-			}
+			hgetSpecs = append(hgetSpecs, hgetSpec{keyIdx: i, tsStr: tsStr})
 		}
-		if !fetchErr {
-			results[i] = merged
+	}
+
+	if len(hgetSpecs) == 0 {
+		return results, be.OrNil()
+	}
+
+	// Phase 3: Pipeline all HGetAll commands for data fetching
+	pipe = redisCli.Pipeline()
+	hgetCmds := make([]*redis.MapStringStringCmd, len(hgetSpecs))
+	for i, spec := range hgetSpecs {
+		dataKey := formatTimelineData(t.name, keys[spec.keyIdx], mustParseInt64(spec.tsStr))
+		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		// Pipeline execution failed, but individual commands may have succeeded
+	}
+
+	// Phase 4: Map HGetAll results back to keys, building merged state per key
+	keyMerged := make([]map[string]string, len(keys))
+	keyHasError := make([]bool, len(keys))
+
+	for i, spec := range hgetSpecs {
+		if keyHasError[spec.keyIdx] {
+			continue // Skip processing for keys that already have errors
+		}
+
+		fields, err := hgetCmds[i].Result()
+		if err != nil && err != redis.Nil {
+			be.Add(keys[spec.keyIdx], fmt.Errorf("failed to get data at %s: %w", spec.tsStr, err))
+			keyHasError[spec.keyIdx] = true
+			continue
+		}
+
+		if keyMerged[spec.keyIdx] == nil {
+			keyMerged[spec.keyIdx] = make(map[string]string)
+		}
+		// Merge fields in chronological order
+		for k, v := range fields {
+			keyMerged[spec.keyIdx][k] = v
+		}
+	}
+
+	// Copy merged results to final results (only for keys without errors)
+	for i := range keys {
+		if !keyHasError[i] && keyMerged[i] != nil {
+			results[i] = keyMerged[i]
 		}
 	}
 
@@ -197,11 +250,25 @@ func (t *redisTimeline) GetExact(ctx context.Context, keys []string, ts time.Tim
 	results := make([]map[string]string, len(keys))
 	be := model.NewBatchError(len(keys))
 
+	// Pipeline all HGetAll commands
+	pipe := redisCli.Pipeline()
+	cmds := make([]*redis.MapStringStringCmd, len(keys))
 	for i, key := range keys {
 		dataKey := formatTimelineData(t.name, key, tsMicros)
-		result, err := redisCli.HGetAll(ctx, dataKey).Result()
-		if err != nil {
-			be.Add(key, fmt.Errorf("failed to get data: %w", err))
+		cmds[i] = pipe.HGetAll(ctx, dataKey)
+	}
+
+	// Execute pipeline
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		// Pipeline execution failed, but individual commands may have succeeded
+		// Continue to process individual command results
+	}
+
+	// Map results back to keys array
+	for i, cmd := range cmds {
+		result, err := cmd.Result()
+		if err != nil && err != redis.Nil {
+			be.Add(keys[i], fmt.Errorf("failed to get data: %w", err))
 			continue
 		}
 		if len(result) == 0 {
@@ -228,68 +295,154 @@ func (t *redisTimeline) GetRange(ctx context.Context, keys []string, start, end 
 	results := make([][]*model.TimeValue, len(keys))
 	be := model.NewBatchError(len(keys))
 
+	// Phase 1: Pipeline all ZRangeArgs commands to fetch timestamps in [start, end]
+	pipe := redisCli.Pipeline()
+	rangeCmds := make([]*redis.StringSliceCmd, len(keys))
 	for i, key := range keys {
 		tsKey := formatTimelineTS(t.name, key)
-
-		// Get timestamps in range
-		timestamps, err := redisCli.ZRangeArgs(ctx, redis.ZRangeArgs{
+		rangeCmds[i] = pipe.ZRangeArgs(ctx, redis.ZRangeArgs{
 			Key:     tsKey,
 			Start:   fmt.Sprintf("%d", startMicros),
 			Stop:    fmt.Sprintf("%d", endMicros),
 			ByScore: true,
-		}).Result()
-		if err != nil {
-			be.Add(key, fmt.Errorf("failed to query timestamps: %w", err))
+		})
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		// Continue processing individual results
+	}
+
+	// Phase 2: Pipeline all ZRangeArgs commands to fetch timestamps in [-inf, end]
+	pipe = redisCli.Pipeline()
+	allCmds := make([]*redis.StringSliceCmd, len(keys))
+	for i, key := range keys {
+		tsKey := formatTimelineTS(t.name, key)
+		allCmds[i] = pipe.ZRangeArgs(ctx, redis.ZRangeArgs{
+			Key:     tsKey,
+			Start:   "-inf",
+			Stop:    fmt.Sprintf("%d", endMicros),
+			ByScore: true,
+		})
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		// Continue processing individual results
+	}
+
+	// Collect results and determine all HGetAll operations needed for merging
+	type hgetSpec struct {
+		keyIdx         int
+		resultIdx      int   // Index in the key's result array
+		resultTsMicros int64 // Timestamp of the result TimeValue
+		mergeTsMicros  int64 // Timestamp of data to merge
+	}
+	var hgetSpecs []hgetSpec
+	keyRangeTimestamps := make([][]string, len(keys))
+	keyAllTimestamps := make([][]string, len(keys))
+
+	for i := range keys {
+		// Get range timestamps
+		timestamps, err := rangeCmds[i].Result()
+		if err != nil && err != redis.Nil {
+			be.Add(keys[i], fmt.Errorf("failed to query timestamps: %w", err))
 			continue
 		}
 		if len(timestamps) == 0 {
 			results[i] = nil
 			continue
 		}
+		keyRangeTimestamps[i] = timestamps
 
-		// Get all timestamps up to end for merging context
-		allTimestamps, err := redisCli.ZRangeArgs(ctx, redis.ZRangeArgs{
-			Key:     tsKey,
-			Start:   "-inf",
-			Stop:    fmt.Sprintf("%d", endMicros),
-			ByScore: true,
-		}).Result()
-		if err != nil {
-			be.Add(key, fmt.Errorf("failed to query all timestamps: %w", err))
+		// Get all timestamps for merging
+		allTimestamps, err := allCmds[i].Result()
+		if err != nil && err != redis.Nil {
+			be.Add(keys[i], fmt.Errorf("failed to query all timestamps: %w", err))
+			continue
+		}
+		keyAllTimestamps[i] = allTimestamps
+
+		// For each result timestamp, determine which data timestamps need to be merged
+		for resultIdx, tsStr := range timestamps {
+			tsMicros := mustParseInt64(tsStr)
+			for _, allTsStr := range allTimestamps {
+				allTsMicros := mustParseInt64(allTsStr)
+				if allTsMicros <= tsMicros {
+					hgetSpecs = append(hgetSpecs, hgetSpec{
+						keyIdx:         i,
+						resultIdx:      resultIdx,
+						resultTsMicros: tsMicros,
+						mergeTsMicros:  allTsMicros,
+					})
+				}
+			}
+		}
+	}
+
+	if len(hgetSpecs) == 0 {
+		return results, be.OrNil()
+	}
+
+	// Phase 3: Pipeline all HGetAll commands for data fetching
+	pipe = redisCli.Pipeline()
+	hgetCmds := make([]*redis.MapStringStringCmd, len(hgetSpecs))
+	for i, spec := range hgetSpecs {
+		dataKey := formatTimelineData(t.name, keys[spec.keyIdx], spec.mergeTsMicros)
+		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		// Continue processing individual results
+	}
+
+	// Build complete merged states for each timestamp using pipelined data
+	type resultKey struct {
+		keyIdx    int
+		resultIdx int
+	}
+	resultMerged := make(map[resultKey]map[string]string)
+	keyHasError := make([]bool, len(keys))
+
+	for i, spec := range hgetSpecs {
+		if keyHasError[spec.keyIdx] {
+			continue
+		}
+
+		fields, err := hgetCmds[i].Result()
+		if err != nil && err != redis.Nil {
+			be.Add(keys[spec.keyIdx], fmt.Errorf("failed to get data at %d: %w", spec.mergeTsMicros, err))
+			keyHasError[spec.keyIdx] = true
+			continue
+		}
+
+		rk := resultKey{keyIdx: spec.keyIdx, resultIdx: spec.resultIdx}
+		if resultMerged[rk] == nil {
+			resultMerged[rk] = make(map[string]string)
+		}
+		// Merge fields in chronological order
+		for k, v := range fields {
+			resultMerged[rk][k] = v
+		}
+	}
+
+	// Build final result array
+	for i := range keys {
+		if keyHasError[i] {
+			continue
+		}
+		if keyRangeTimestamps[i] == nil {
 			continue
 		}
 
 		var tvs []*model.TimeValue
-		fetchErr := false
-		for _, tsStr := range timestamps {
+		for resultIdx, tsStr := range keyRangeTimestamps[i] {
 			tsMicros := mustParseInt64(tsStr)
-			merged := make(map[string]string)
-			for _, allTsStr := range allTimestamps {
-				allTsMicros := mustParseInt64(allTsStr)
-				if allTsMicros <= tsMicros {
-					dataKey := formatTimelineData(t.name, key, allTsMicros)
-					fields, err := redisCli.HGetAll(ctx, dataKey).Result()
-					if err != nil {
-						be.Add(key, fmt.Errorf("failed to get data at %s: %w", allTsStr, err))
-						fetchErr = true
-						break
-					}
-					for k, v := range fields {
-						merged[k] = v
-					}
-				}
-			}
-			if fetchErr {
-				break
-			}
+			rk := resultKey{keyIdx: i, resultIdx: resultIdx}
 			tvs = append(tvs, &model.TimeValue{
 				Time:  time.UnixMicro(tsMicros),
-				Value: merged,
+				Value: resultMerged[rk],
 			})
 		}
-		if !fetchErr {
-			results[i] = tvs
-		}
+		results[i] = tvs
 	}
 
 	return results, be.OrNil()
@@ -307,33 +460,82 @@ func (t *redisTimeline) GetLatest(ctx context.Context, keys []string) ([]map[str
 	results := make([]map[string]string, len(keys))
 	be := model.NewBatchError(len(keys))
 
+	// Phase 1: Pipeline all ZRange commands to fetch timestamps
+	pipe := redisCli.Pipeline()
+	zrangeCmds := make([]*redis.StringSliceCmd, len(keys))
 	for i, key := range keys {
 		tsKey := formatTimelineTS(t.name, key)
-		timestamps, err := redisCli.ZRange(ctx, tsKey, 0, -1).Result()
-		if err != nil {
-			be.Add(key, fmt.Errorf("failed to query timestamps: %w", err))
+		zrangeCmds[i] = pipe.ZRange(ctx, tsKey, 0, -1)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		// Pipeline execution failed, but individual commands may have succeeded
+	}
+
+	// Phase 2: Collect all timestamp results and build flat list of HGetAll operations
+	type hgetSpec struct {
+		keyIdx int
+		tsStr  string
+	}
+	var hgetSpecs []hgetSpec
+
+	for i, cmd := range zrangeCmds {
+		timestamps, err := cmd.Result()
+		if err != nil && err != redis.Nil {
+			be.Add(keys[i], fmt.Errorf("failed to query timestamps: %w", err))
 			continue
 		}
 		if len(timestamps) == 0 {
 			results[i] = nil
 			continue
 		}
-		merged := make(map[string]string)
-		fetchErr := false
+		// Add all HGetAll operations needed for this key
 		for _, tsStr := range timestamps {
-			dataKey := formatTimelineData(t.name, key, mustParseInt64(tsStr))
-			fields, err := redisCli.HGetAll(ctx, dataKey).Result()
-			if err != nil {
-				be.Add(key, fmt.Errorf("failed to get data: %w", err))
-				fetchErr = true
-				break
-			}
-			for k, v := range fields {
-				merged[k] = v
-			}
+			hgetSpecs = append(hgetSpecs, hgetSpec{keyIdx: i, tsStr: tsStr})
 		}
-		if !fetchErr {
-			results[i] = merged
+	}
+
+	if len(hgetSpecs) == 0 {
+		return results, be.OrNil()
+	}
+
+	// Phase 3: Pipeline all HGetAll commands for data fetching
+	pipe = redisCli.Pipeline()
+	hgetCmds := make([]*redis.MapStringStringCmd, len(hgetSpecs))
+	for i, spec := range hgetSpecs {
+		dataKey := formatTimelineData(t.name, keys[spec.keyIdx], mustParseInt64(spec.tsStr))
+		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		// Pipeline execution failed, but individual commands may have succeeded
+	}
+
+	// Phase 4: Map HGetAll results back to keys, building merged state per key
+	keyMerged := make([]map[string]string, len(keys))
+	for i, spec := range hgetSpecs {
+		fields, err := hgetCmds[i].Result()
+		if err != nil && err != redis.Nil {
+			be.Add(keys[spec.keyIdx], fmt.Errorf("failed to get data: %w", err))
+			// Mark this key as having an error so we don't set incomplete results
+			if keyMerged[spec.keyIdx] == nil {
+				keyMerged[spec.keyIdx] = map[string]string{} // Use empty map as error marker
+			}
+			continue
+		}
+		if keyMerged[spec.keyIdx] == nil {
+			keyMerged[spec.keyIdx] = make(map[string]string)
+		}
+		// Merge fields in chronological order
+		for k, v := range fields {
+			keyMerged[spec.keyIdx][k] = v
+		}
+	}
+
+	// Copy merged results to final results (only for keys without errors)
+	for i := range keys {
+		if len(keyMerged[i]) > 0 {
+			results[i] = keyMerged[i]
 		}
 	}
 
@@ -401,44 +603,95 @@ func (t *redisTimeline) GetAffectedRange(ctx context.Context, key string, insert
 	redisCli := t.cli.getRedisCli()
 	tsKey := formatTimelineTS(t.name, key)
 
-	timestamps, err := redisCli.ZRangeArgs(ctx, redis.ZRangeArgs{
+	// Phase 1: Pipeline both ZRangeArgs (affected range) and ZRange (all timestamps) commands
+	pipe := redisCli.Pipeline()
+	affectedCmd := pipe.ZRangeArgs(ctx, redis.ZRangeArgs{
 		Key:     tsKey,
 		Start:   fmt.Sprintf("%d", insertedMicros),
 		Stop:    "+inf",
 		ByScore: true,
-	}).Result()
-	if err != nil {
+	})
+	allCmd := pipe.ZRange(ctx, tsKey, 0, -1)
+
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return nil, fmt.Errorf("failed to query timestamps: %w", err)
 	}
 
-	allTimestamps, err := redisCli.ZRange(ctx, tsKey, 0, -1).Result()
-	if err != nil {
+	timestamps, err := affectedCmd.Result()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("failed to query timestamps: %w", err)
+	}
+
+	allTimestamps, err := allCmd.Result()
+	if err != nil && err != redis.Nil {
 		return nil, fmt.Errorf("failed to query all timestamps: %w", err)
 	}
 
-	var result []*model.TimeValue
-	for _, tsStr := range timestamps {
-		tsMicros := mustParseInt64(tsStr)
+	if len(timestamps) == 0 {
+		return nil, nil
+	}
 
-		merged := make(map[string]string)
+	// Phase 2: Collect results and determine all HGetAll operations needed for merging
+	type hgetSpec struct {
+		resultIdx     int   // Index in the result array
+		tsMicros      int64 // Result timestamp
+		mergeTsMicros int64 // Data timestamp to merge
+	}
+	var hgetSpecs []hgetSpec
+
+	for resultIdx, tsStr := range timestamps {
+		tsMicros := mustParseInt64(tsStr)
+		// For each result timestamp, collect all timestamps ≤ it for merging
 		for _, allTsStr := range allTimestamps {
 			allTsMicros := mustParseInt64(allTsStr)
 			if allTsMicros <= tsMicros {
-				dataKey := formatTimelineData(t.name, key, allTsMicros)
-				fields, err := redisCli.HGetAll(ctx, dataKey).Result()
-				if err != nil {
-					continue
-				}
-				for k, v := range fields {
-					merged[k] = v
-				}
+				hgetSpecs = append(hgetSpecs, hgetSpec{
+					resultIdx:     resultIdx,
+					tsMicros:      tsMicros,
+					mergeTsMicros: allTsMicros,
+				})
 			}
 		}
+	}
 
-		result = append(result, &model.TimeValue{
+	// Phase 3: Pipeline all HGetAll commands for data fetching
+	pipe = redisCli.Pipeline()
+	hgetCmds := make([]*redis.MapStringStringCmd, len(hgetSpecs))
+	for i, spec := range hgetSpecs {
+		dataKey := formatTimelineData(t.name, key, spec.mergeTsMicros)
+		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		// Continue processing individual results
+	}
+
+	// Phase 4: Build merged state for each affected timestamp using pipelined data
+	result := make([]*model.TimeValue, len(timestamps))
+	resultMerged := make([]map[string]string, len(timestamps))
+
+	for i, spec := range hgetSpecs {
+		fields, err := hgetCmds[i].Result()
+		if err != nil && err != redis.Nil {
+			continue // Skip failed fetches
+		}
+
+		if resultMerged[spec.resultIdx] == nil {
+			resultMerged[spec.resultIdx] = make(map[string]string)
+		}
+		// Merge fields in chronological order
+		for k, v := range fields {
+			resultMerged[spec.resultIdx][k] = v
+		}
+	}
+
+	// Build final result array
+	for i, tsStr := range timestamps {
+		tsMicros := mustParseInt64(tsStr)
+		result[i] = &model.TimeValue{
 			Time:  time.UnixMicro(tsMicros),
-			Value: merged,
-		})
+			Value: resultMerged[i],
+		}
 	}
 
 	return result, nil
@@ -545,9 +798,9 @@ func (t *redisTimeline) AddKeyLabels(ctx context.Context, key string, labels []s
 			continue
 		}
 		labelKey := formatTimelineLabel(t.name, label)
-		pipe.SAdd(ctx, labelsKey, label)        // T@{name}/L/ ← label name
-		pipe.SAdd(ctx, labelKey, key)           // T@{name}/L/{label} ← key (inverted index)
-		pipe.SAdd(ctx, keyLabelsKey, label)     // T@{name}/K/{key}/L ← label (forward index)
+		pipe.SAdd(ctx, labelsKey, label)    // T@{name}/L/ ← label name
+		pipe.SAdd(ctx, labelKey, key)       // T@{name}/L/{label} ← key (inverted index)
+		pipe.SAdd(ctx, keyLabelsKey, label) // T@{name}/K/{key}/L ← label (forward index)
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
