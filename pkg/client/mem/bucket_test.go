@@ -380,3 +380,35 @@ func BenchmarkFilter1000Label8(b *testing.B) {
 		b.Errorf("expect 1000 got %v", len(results))
 	}
 }
+
+// --- 8.7: BatchError contract for mem Docs and Values ---
+
+// TestBucket_BatchErrorContract verifies that Docs and Values:
+//   - process all keys (never fail-fast),
+//   - return nil at position i for missing keys (not an error),
+//   - return nil error when no real retrieval failures occurred.
+func TestBucket_BatchErrorContract(t *testing.T) {
+	ctx := context.Background()
+	cli := NewClient()
+	bkt, err := NewBucket[testData](cli, "batchctx")
+	require.NoError(t, err)
+
+	_, err = bkt.Update(ctx, "exists", &testData{"hello"})
+	require.NoError(t, err)
+
+	// Docs: mixed existing + missing
+	docs, err := bkt.Docs(ctx, []string{"exists", "missing1", "missing2"})
+	require.NoError(t, err) // nil error — missing is not a failure
+	require.Len(t, docs, 3)
+	assert.NotNil(t, docs[0], "exists should be non-nil")
+	assert.Nil(t, docs[1], "missing1 should be nil")
+	assert.Nil(t, docs[2], "missing2 should be nil")
+
+	// Values: mixed existing + missing
+	vals, err := bkt.Values(ctx, []string{"missing1", "exists", "missing2"})
+	require.NoError(t, err)
+	require.Len(t, vals, 3)
+	assert.Nil(t, vals[0], "missing1 should be nil")
+	assert.NotNil(t, vals[1], "exists should be non-nil")
+	assert.Nil(t, vals[2], "missing2 should be nil")
+}

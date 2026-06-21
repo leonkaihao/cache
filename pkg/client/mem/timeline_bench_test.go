@@ -35,7 +35,7 @@ func BenchmarkTimeline_GetAt(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tl.GetAt(ctx, "key1", now.Add(500*time.Millisecond))
+		tl.GetAt(ctx, []string{"key1"}, now.Add(500*time.Millisecond))
 	}
 }
 
@@ -54,7 +54,7 @@ func BenchmarkTimeline_GetRange(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tl.GetRange(ctx, "key1", now, now.Add(100*time.Millisecond))
+		tl.GetRange(ctx, []string{"key1"}, now, now.Add(100*time.Millisecond))
 	}
 }
 

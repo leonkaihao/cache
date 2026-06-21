@@ -41,6 +41,6 @@ func BenchmarkRedisTimeline_GetAt(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tl.GetAt(ctx, "key1", now.Add(500*time.Millisecond))
+		tl.GetAt(ctx, []string{"key1"}, now.Add(500*time.Millisecond))
 	}
 }

@@ -265,19 +265,21 @@ func timelineOperations(ctx context.Context, cli model.CacheClient) error {
 	}
 
 	// Query current state (merged from all updates)
-	state, err := timeline.GetLatest(ctx, "device_A")
+	latestStates, err := timeline.GetLatest(ctx, []string{"device_A"})
 	if err != nil {
 		return err
 	}
+	state := latestStates[0]
 	log.Printf("Latest state: zones=%s, beacons=%s, battery=%s\n", 
 		state["zones"], state["beacons"], state["battery"])
 	// Output: zones=Z1,Z3,Z5, beacons=B5, battery=82
 
 	// Query historical state
-	historicalState, err := timeline.GetAt(ctx, "device_A", now.Add(7*time.Minute))
+	historicalStates, err := timeline.GetAt(ctx, []string{"device_A"}, now.Add(7*time.Minute))
 	if err != nil {
 		return err
 	}
+	historicalState := historicalStates[0]
 	log.Printf("State at +7min: zones=%s, beacons=%s, battery=%s\n",
 		historicalState["zones"], historicalState["beacons"], historicalState["battery"])
 	// Output: zones=Z1,Z3,Z5, beacons=B5, battery=85

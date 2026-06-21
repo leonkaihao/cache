@@ -24,27 +24,39 @@ type CacheTimeline interface {
 	// If force is true, overwrites existing fields.
 	Insert(ctx context.Context, key string, ts time.Time, data map[string]string, force bool) error
 
-	// GetAt returns the complete state at or before the specified timestamp.
-	// State is reconstructed by merging all field updates up to ts.
-	GetAt(ctx context.Context, key string, ts time.Time) (map[string]string, error)
+	// GetAt returns the complete merged state at or before ts for each key.
+	// Results are parallel to keys: results[i] corresponds to keys[i].
+	// nil at results[i] means keys[i] has no state at or before ts (not an error).
+	// Returns *BatchError if one or more keys encountered retrieval errors.
+	GetAt(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error)
 
-	// GetExact returns the raw sparse data at the exact timestamp.
-	// Returns error if no data exists at the exact timestamp.
-	GetExact(ctx context.Context, key string, ts time.Time) (map[string]string, error)
+	// GetExact returns the raw sparse fields at the exact timestamp for each key.
+	// Results are parallel to keys: results[i] corresponds to keys[i].
+	// nil at results[i] means keys[i] has no time point at exactly ts (not an error).
+	// Returns *BatchError if one or more keys encountered retrieval errors.
+	GetExact(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error)
 
-	// GetRange returns all complete states in the time range [start, end].
-	// Each TimeValue contains a complete state (merged from history).
-	GetRange(ctx context.Context, key string, start, end time.Time) ([]TimeValue, error)
+	// GetRange returns all complete states in [start, end] for each key.
+	// Results are parallel to keys: results[i] corresponds to keys[i].
+	// nil at results[i] means keys[i] has no time points in the range (not an error).
+	// Non-nil inner slices contain only non-nil *TimeValue pointers.
+	// Returns *BatchError if one or more keys encountered retrieval errors.
+	GetRange(ctx context.Context, keys []string, start, end time.Time) ([][]*TimeValue, error)
 
-	// GetLatest returns the complete state at the most recent timestamp.
-	GetLatest(ctx context.Context, key string) (map[string]string, error)
+	// GetLatest returns the complete merged state at the most recent timestamp for each key.
+	// Results are parallel to keys: results[i] corresponds to keys[i].
+	// nil at results[i] means keys[i] has no time-series data (not an error).
+	// Returns *BatchError if one or more keys encountered retrieval errors.
+	GetLatest(ctx context.Context, keys []string) ([]map[string]string, error)
 
 	// Timeline returns all complete states for the key in chronological order.
-	Timeline(ctx context.Context, key string) ([]TimeValue, error)
+	// Each element is a non-nil *TimeValue pointer.
+	Timeline(ctx context.Context, key string) ([]*TimeValue, error)
 
 	// GetAffectedRange returns all states from insertedAt (inclusive) to end of timeline.
 	// Used for recomputation after historical insertion.
-	GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]TimeValue, error)
+	// Each element is a non-nil *TimeValue pointer.
+	GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]*TimeValue, error)
 
 	// SetRetention sets the retention policy for the timeline.
 	// Policy applies to all keys unless overridden with SetKeyRetention.
@@ -61,8 +73,24 @@ type CacheTimeline interface {
 	// Returns timeline's default policy if no key-specific policy is set.
 	GetKeyRetention(key string) RetentionPolicy
 
-	// Keys returns all keys that have been written to the timeline.
-	Keys(ctx context.Context) ([]string, error)
+	// Keys returns all logical keys in the timeline.
+	// With no label filter arguments, all keys are returned.
+	// Labels within a single []string argument are OR'd together.
+	// Multiple arguments are AND'd: Keys(ctx, []string{"a","b"}, []string{"c"})
+	// returns keys that have (a OR b) AND c.
+	Keys(ctx context.Context, labelFilters ...[]string) ([]string, error)
+
+	// AddKeyLabels associates labels with a logical key.
+	// Empty strings in labels are ignored. Adding an existing label is a no-op.
+	AddKeyLabels(ctx context.Context, key string, labels []string) error
+
+	// RemoveKeyLabels removes labels from a logical key.
+	// Removing a non-existent label is a no-op.
+	RemoveKeyLabels(ctx context.Context, key string, labels []string) error
+
+	// KeyLabels returns the set of labels associated with a logical key.
+	// Returns an empty LabelSet if the key has no labels or does not exist.
+	KeyLabels(ctx context.Context, key string) (LabelSet, error)
 
 	// Remove removes the specified keys from the timeline.
 	Remove(ctx context.Context, keys []string) error

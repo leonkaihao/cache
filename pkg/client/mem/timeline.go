@@ -15,8 +15,12 @@ type memTimeline struct {
 	data          map[string]*timelineData
 	retention     model.RetentionPolicy
 	keyRetentions map[string]model.RetentionPolicy
-	mu            sync.RWMutex
-	client        *client
+	// keyLabels maps each logical key to its set of labels (forward index).
+	keyLabels map[string]map[string]bool
+	// labelIndex maps each label to the set of logical keys with that label (inverted index).
+	labelIndex map[string]map[string]bool
+	mu         sync.RWMutex
+	client     *client
 }
 
 // timelineData holds all time points for a specific key.
@@ -133,16 +137,12 @@ func (t *memTimeline) Insert(ctx context.Context, key string, ts time.Time, data
 	return t.Append(ctx, key, ts, data, force)
 }
 
-// GetAt returns the complete state at or before the specified timestamp.
-func (t *memTimeline) GetAt(ctx context.Context, key string, ts time.Time) (map[string]string, error) {
+// GetAt returns the complete merged state at or before ts for each key.
+func (t *memTimeline) GetAt(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
-	}
-
-	if key == "" {
-		return nil, fmt.Errorf("key cannot be empty")
 	}
 
 	tsMicros := normalizeTimestamp(ts)
@@ -153,41 +153,43 @@ func (t *memTimeline) GetAt(ctx context.Context, key string, ts time.Time) (map[
 		return nil, ctx.Err()
 	}
 
-	td, ok := t.data[key]
-	if !ok {
-		return nil, fmt.Errorf("key '%s' not found in timeline '%s'", key, t.name)
-	}
+	results := make([]map[string]string, len(keys))
+	be := model.NewBatchError(len(keys))
 
-	if len(td.points) == 0 {
-		return nil, fmt.Errorf("no state found at or before %s", time.UnixMicro(tsMicros).Format(time.RFC3339Nano))
-	}
-
-	idx := -1
-	for i, point := range td.points {
-		if point.ts <= tsMicros {
-			idx = i
-		} else {
-			break
+	for i, key := range keys {
+		td, ok := t.data[key]
+		if !ok {
+			results[i] = nil
+			continue
 		}
+		if len(td.points) == 0 {
+			results[i] = nil
+			continue
+		}
+		idx := -1
+		for j, point := range td.points {
+			if point.ts <= tsMicros {
+				idx = j
+			} else {
+				break
+			}
+		}
+		if idx == -1 {
+			results[i] = nil
+			continue
+		}
+		results[i] = mergeFields(td.points[:idx+1])
 	}
 
-	if idx == -1 {
-		return nil, fmt.Errorf("no state found at or before %s", time.UnixMicro(tsMicros).Format(time.RFC3339Nano))
-	}
-
-	return mergeFields(td.points[:idx+1]), nil
+	return results, be.OrNil()
 }
 
-// GetExact returns the raw sparse data at the exact timestamp.
-func (t *memTimeline) GetExact(ctx context.Context, key string, ts time.Time) (map[string]string, error) {
+// GetExact returns the raw sparse fields at the exact timestamp for each key.
+func (t *memTimeline) GetExact(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
-	}
-
-	if key == "" {
-		return nil, fmt.Errorf("key cannot be empty")
 	}
 
 	tsMicros := normalizeTimestamp(ts)
@@ -198,33 +200,36 @@ func (t *memTimeline) GetExact(ctx context.Context, key string, ts time.Time) (m
 		return nil, ctx.Err()
 	}
 
-	td, ok := t.data[key]
-	if !ok {
-		return nil, fmt.Errorf("key '%s' not found in timeline '%s'", key, t.name)
+	results := make([]map[string]string, len(keys))
+	be := model.NewBatchError(len(keys))
+
+	for i, key := range keys {
+		td, ok := t.data[key]
+		if !ok {
+			results[i] = nil
+			continue
+		}
+		idx, found := findTimePoint(td.points, tsMicros)
+		if !found {
+			results[i] = nil
+			continue
+		}
+		result := make(map[string]string, len(td.points[idx].fields))
+		for k, v := range td.points[idx].fields {
+			result[k] = v
+		}
+		results[i] = result
 	}
 
-	idx, found := findTimePoint(td.points, tsMicros)
-	if !found {
-		return nil, fmt.Errorf("no exact timestamp found at %s", time.UnixMicro(tsMicros).Format(time.RFC3339Nano))
-	}
-
-	result := make(map[string]string, len(td.points[idx].fields))
-	for k, v := range td.points[idx].fields {
-		result[k] = v
-	}
-	return result, nil
+	return results, be.OrNil()
 }
 
-// GetRange returns all complete states in the time range [start, end].
-func (t *memTimeline) GetRange(ctx context.Context, key string, start, end time.Time) ([]model.TimeValue, error) {
+// GetRange returns all complete states in [start, end] for each key.
+func (t *memTimeline) GetRange(ctx context.Context, keys []string, start, end time.Time) ([][]*model.TimeValue, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
-	}
-
-	if key == "" {
-		return nil, fmt.Errorf("key cannot be empty")
 	}
 
 	startMicros := normalizeTimestamp(start)
@@ -236,35 +241,38 @@ func (t *memTimeline) GetRange(ctx context.Context, key string, start, end time.
 		return nil, ctx.Err()
 	}
 
-	td, ok := t.data[key]
-	if !ok {
-		return nil, fmt.Errorf("key '%s' not found in timeline '%s'", key, t.name)
-	}
+	results := make([][]*model.TimeValue, len(keys))
+	be := model.NewBatchError(len(keys))
 
-	var result []model.TimeValue
-	for i, point := range td.points {
-		if point.ts >= startMicros && point.ts <= endMicros {
-			merged := mergeFields(td.points[:i+1])
-			result = append(result, model.TimeValue{
-				Time:  time.UnixMicro(point.ts),
-				Value: merged,
-			})
+	for i, key := range keys {
+		td, ok := t.data[key]
+		if !ok {
+			results[i] = nil
+			continue
 		}
+		var tvs []*model.TimeValue
+		for j, point := range td.points {
+			if point.ts >= startMicros && point.ts <= endMicros {
+				merged := mergeFields(td.points[:j+1])
+				tv := &model.TimeValue{
+					Time:  time.UnixMicro(point.ts),
+					Value: merged,
+				}
+				tvs = append(tvs, tv)
+			}
+		}
+		results[i] = tvs // nil if no points in range
 	}
 
-	return result, nil
+	return results, be.OrNil()
 }
 
-// GetLatest returns the complete state at the most recent timestamp.
-func (t *memTimeline) GetLatest(ctx context.Context, key string) (map[string]string, error) {
+// GetLatest returns the complete merged state at the most recent timestamp for each key.
+func (t *memTimeline) GetLatest(ctx context.Context, keys []string) ([]map[string]string, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
-	}
-
-	if key == "" {
-		return nil, fmt.Errorf("key cannot be empty")
 	}
 
 	t.mu.RLock()
@@ -274,20 +282,23 @@ func (t *memTimeline) GetLatest(ctx context.Context, key string) (map[string]str
 		return nil, ctx.Err()
 	}
 
-	td, ok := t.data[key]
-	if !ok {
-		return nil, fmt.Errorf("key '%s' not found in timeline '%s'", key, t.name)
+	results := make([]map[string]string, len(keys))
+	be := model.NewBatchError(len(keys))
+
+	for i, key := range keys {
+		td, ok := t.data[key]
+		if !ok || len(td.points) == 0 {
+			results[i] = nil
+			continue
+		}
+		results[i] = mergeFields(td.points)
 	}
 
-	if len(td.points) == 0 {
-		return nil, fmt.Errorf("no state found for key '%s'", key)
-	}
-
-	return mergeFields(td.points), nil
+	return results, be.OrNil()
 }
 
 // Timeline returns all complete states for the key in chronological order.
-func (t *memTimeline) Timeline(ctx context.Context, key string) ([]model.TimeValue, error) {
+func (t *memTimeline) Timeline(ctx context.Context, key string) ([]*model.TimeValue, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -310,10 +321,10 @@ func (t *memTimeline) Timeline(ctx context.Context, key string) ([]model.TimeVal
 		return nil, fmt.Errorf("key '%s' not found in timeline '%s'", key, t.name)
 	}
 
-	result := make([]model.TimeValue, 0, len(td.points))
+	result := make([]*model.TimeValue, 0, len(td.points))
 	for i, point := range td.points {
 		merged := mergeFields(td.points[:i+1])
-		result = append(result, model.TimeValue{
+		result = append(result, &model.TimeValue{
 			Time:  time.UnixMicro(point.ts),
 			Value: merged,
 		})
@@ -323,7 +334,7 @@ func (t *memTimeline) Timeline(ctx context.Context, key string) ([]model.TimeVal
 }
 
 // GetAffectedRange returns all states from insertedAt (inclusive) to end of timeline.
-func (t *memTimeline) GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]model.TimeValue, error) {
+func (t *memTimeline) GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]*model.TimeValue, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -347,11 +358,11 @@ func (t *memTimeline) GetAffectedRange(ctx context.Context, key string, inserted
 		return nil, fmt.Errorf("key '%s' not found in timeline '%s'", key, t.name)
 	}
 
-	var result []model.TimeValue
+	var result []*model.TimeValue
 	for i, point := range td.points {
 		if point.ts >= insertedMicros {
 			merged := mergeFields(td.points[:i+1])
-			result = append(result, model.TimeValue{
+			result = append(result, &model.TimeValue{
 				Time:  time.UnixMicro(point.ts),
 				Value: merged,
 			})
@@ -361,8 +372,10 @@ func (t *memTimeline) GetAffectedRange(ctx context.Context, key string, inserted
 	return result, nil
 }
 
-// Keys returns all keys that have been written to the timeline.
-func (t *memTimeline) Keys(ctx context.Context) ([]string, error) {
+// Keys returns all logical keys, optionally filtered by labels.
+// With no arguments returns all keys. Labels within one []string are OR'd;
+// multiple arguments are AND'd.
+func (t *memTimeline) Keys(ctx context.Context, labelFilters ...[]string) ([]string, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -376,15 +389,125 @@ func (t *memTimeline) Keys(ctx context.Context) ([]string, error) {
 		return nil, ctx.Err()
 	}
 
-	result := make([]string, 0, len(t.data))
-	for key := range t.data {
-		result = append(result, key)
+	if len(labelFilters) == 0 {
+		result := make([]string, 0, len(t.data))
+		for key := range t.data {
+			result = append(result, key)
+		}
+		return result, nil
 	}
 
-	return result, nil
+	// Step 0: union of all keys matching any label in first filter step.
+	result := map[string]bool{}
+	firstStep := labelFilters[0]
+	if len(firstStep) == 0 {
+		for key := range t.data {
+			result[key] = true
+		}
+	} else {
+		for _, label := range firstStep {
+			for key := range t.labelIndex[label] {
+				result[key] = true
+			}
+		}
+	}
+
+	// Subsequent steps: AND — keep only keys that match at least one label in this step.
+	for _, step := range labelFilters[1:] {
+		if len(step) == 0 {
+			continue
+		}
+		for key := range result {
+			labels := t.keyLabels[key]
+			matchesStep := false
+			for _, label := range step {
+				if labels[label] {
+					matchesStep = true
+					break
+				}
+			}
+			if !matchesStep {
+				delete(result, key)
+			}
+		}
+	}
+
+	keys := make([]string, 0, len(result))
+	for key := range result {
+		keys = append(keys, key)
+	}
+	return keys, nil
 }
 
-// Remove removes the specified keys from the timeline.
+// AddKeyLabels associates labels with a logical key.
+func (t *memTimeline) AddKeyLabels(ctx context.Context, key string, labels []string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.keyLabels[key] == nil {
+		t.keyLabels[key] = make(map[string]bool)
+	}
+	for _, label := range labels {
+		if label == "" {
+			continue
+		}
+		t.keyLabels[key][label] = true
+		if t.labelIndex[label] == nil {
+			t.labelIndex[label] = make(map[string]bool)
+		}
+		t.labelIndex[label][key] = true
+	}
+	return nil
+}
+
+// RemoveKeyLabels removes labels from a logical key.
+func (t *memTimeline) RemoveKeyLabels(ctx context.Context, key string, labels []string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for _, label := range labels {
+		if label == "" {
+			continue
+		}
+		delete(t.keyLabels[key], label)
+		if idx, ok := t.labelIndex[label]; ok {
+			delete(idx, key)
+		}
+	}
+	return nil
+}
+
+// KeyLabels returns the label set for a logical key.
+func (t *memTimeline) KeyLabels(ctx context.Context, key string) (model.LabelSet, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	ls := model.LabelSet{}
+	for label := range t.keyLabels[key] {
+		ls[label] = true
+	}
+	return ls, nil
+}
+
+// Remove removes the specified keys from the timeline, cleaning up label indexes.
 func (t *memTimeline) Remove(ctx context.Context, keys []string) error {
 	select {
 	case <-ctx.Done():
@@ -400,6 +523,13 @@ func (t *memTimeline) Remove(ctx context.Context, keys []string) error {
 	}
 
 	for _, key := range keys {
+		// Clean up label indexes.
+		for label := range t.keyLabels[key] {
+			if idx, ok := t.labelIndex[label]; ok {
+				delete(idx, key)
+			}
+		}
+		delete(t.keyLabels, key)
 		delete(t.data, key)
 	}
 
@@ -423,6 +553,8 @@ func (t *memTimeline) Clear(ctx context.Context) error {
 
 	t.data = make(map[string]*timelineData)
 	t.keyRetentions = make(map[string]model.RetentionPolicy)
+	t.keyLabels = make(map[string]map[string]bool)
+	t.labelIndex = make(map[string]map[string]bool)
 
 	return nil
 }

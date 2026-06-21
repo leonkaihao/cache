@@ -58,10 +58,12 @@ func (bkt *bucket[T]) Docs(ctx context.Context, keys []string) ([]model.CacheDoc
 		return nil, fmt.Errorf("fail to check docs existence: %w", err)
 	}
 
+	be := model.NewBatchError(len(keys))
 	for i, cmd := range cmds {
 		exists, err := cmd.Result()
 		if err != nil {
-			return nil, fmt.Errorf("fail to check cache doc %v: %w", newKeys[i], err)
+			be.Add(keys[i], fmt.Errorf("fail to check cache doc %v: %w", newKeys[i], err))
+			continue
 		}
 		if exists == 0 {
 			docs[i] = nil
@@ -73,7 +75,7 @@ func (bkt *bucket[T]) Docs(ctx context.Context, keys []string) ([]model.CacheDoc
 		}
 	}
 
-	return docs, nil
+	return docs, be.OrNil()
 }
 
 func (bkt *bucket[T]) Values(ctx context.Context, keys []string) ([]any, error) {
@@ -97,6 +99,7 @@ func (bkt *bucket[T]) Values(ctx context.Context, keys []string) ([]any, error) 
 		return nil, fmt.Errorf("fail to get values: %w", err)
 	}
 
+	be := model.NewBatchError(len(keys))
 	for i, cmd := range cmds {
 		jsonData, err := cmd.Result()
 		if err != nil {
@@ -104,16 +107,18 @@ func (bkt *bucket[T]) Values(ctx context.Context, keys []string) ([]any, error) 
 				values[i] = nil
 				continue
 			}
-			return nil, fmt.Errorf("fail to fetch cache doc %v: %w", newKeys[i], err)
+			be.Add(keys[i], fmt.Errorf("fail to fetch cache doc %v: %w", newKeys[i], err))
+			continue
 		}
 		data := new(T)
 		if err := bkt.coder.Decode(jsonData, data); err != nil {
-			return nil, fmt.Errorf("fail to decode value of cache doc %v: %w", newKeys[i], err)
+			be.Add(keys[i], fmt.Errorf("fail to decode value of cache doc %v: %w", newKeys[i], err))
+			continue
 		}
 		values[i] = data
 	}
 
-	return values, nil
+	return values, be.OrNil()
 }
 
 func (bkt *bucket[T]) Update(ctx context.Context, key string, data any) (model.CacheDoc, error) {

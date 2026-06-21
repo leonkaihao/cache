@@ -44,9 +44,9 @@ func (suite *TimelineTestSuite) TestAppendAndGetAt(t *testing.T) {
 	}, false)
 	require.NoError(t, err)
 
-	state, err := tl.GetAt(ctx, "key1", now)
+	state, err := tl.GetAt(ctx, []string{"key1"}, now)
 	require.NoError(t, err)
-	assert.Equal(t, "value1", state["field1"])
+	assert.Equal(t, "value1", state[0]["field1"])
 }
 
 func (suite *TimelineTestSuite) TestSparseFieldUpdates(t *testing.T) {
@@ -66,10 +66,10 @@ func (suite *TimelineTestSuite) TestSparseFieldUpdates(t *testing.T) {
 		"field1": "updated",
 	}, false)
 
-	state, err := tl.GetAt(ctx, "key1", t2)
+	results, err := tl.GetAt(ctx, []string{"key1"}, t2)
 	require.NoError(t, err)
-	assert.Equal(t, "updated", state["field1"])
-	assert.Equal(t, "value2", state["field2"])
+	assert.Equal(t, "updated", results[0]["field1"])
+	assert.Equal(t, "value2", results[0]["field2"])
 }
 
 func (suite *TimelineTestSuite) TestFieldConflicts(t *testing.T) {
@@ -99,9 +99,10 @@ func (suite *TimelineTestSuite) TestTimestampNormalization(t *testing.T) {
 
 	tl.Append(ctx, "key1", ts, map[string]string{"field1": "value1"}, false)
 
-	state, err := tl.GetExact(ctx, "key1", ts)
+	// Query with same time (nanoseconds should be truncated)
+	normResults, err := tl.GetExact(ctx, []string{"key1"}, ts)
 	require.NoError(t, err)
-	assert.Equal(t, "value1", state["field1"])
+	assert.Equal(t, "value1", normResults[0]["field1"])
 }
 
 func (suite *TimelineTestSuite) TestGetExact(t *testing.T) {
@@ -116,10 +117,10 @@ func (suite *TimelineTestSuite) TestGetExact(t *testing.T) {
 	tl.Append(ctx, "key1", t2, map[string]string{"field2": "value2"}, false)
 
 	// Get exact t2 (should only have field2)
-	state, err := tl.GetExact(ctx, "key1", t2)
+	exactResults, err := tl.GetExact(ctx, []string{"key1"}, t2)
 	require.NoError(t, err)
-	assert.Len(t, state, 1)
-	assert.Equal(t, "value2", state["field2"])
+	assert.Len(t, exactResults[0], 1)
+	assert.Equal(t, "value2", exactResults[0]["field2"])
 }
 
 func (suite *TimelineTestSuite) TestGetRange(t *testing.T) {
@@ -133,9 +134,9 @@ func (suite *TimelineTestSuite) TestGetRange(t *testing.T) {
 	tl.Append(ctx, "key1", base.Add(time.Second), map[string]string{"v": "2"}, false)
 	tl.Append(ctx, "key1", base.Add(2*time.Second), map[string]string{"v": "3"}, false)
 
-	results, err := tl.GetRange(ctx, "key1", base, base.Add(2*time.Second))
+	rangeResults, err := tl.GetRange(ctx, []string{"key1"}, base, base.Add(2*time.Second))
 	require.NoError(t, err)
-	assert.Len(t, results, 3)
+	assert.Len(t, rangeResults[0], 3)
 }
 
 func (suite *TimelineTestSuite) TestGetLatest(t *testing.T) {
@@ -148,10 +149,10 @@ func (suite *TimelineTestSuite) TestGetLatest(t *testing.T) {
 	tl.Append(ctx, "key1", base, map[string]string{"f1": "v1"}, false)
 	tl.Append(ctx, "key1", base.Add(time.Second), map[string]string{"f2": "v2"}, false)
 
-	state, err := tl.GetLatest(ctx, "key1")
+	latestResults, err := tl.GetLatest(ctx, []string{"key1"})
 	require.NoError(t, err)
-	assert.Equal(t, "v1", state["f1"])
-	assert.Equal(t, "v2", state["f2"])
+	assert.Equal(t, "v1", latestResults[0]["f1"])
+	assert.Equal(t, "v2", latestResults[0]["f2"])
 }
 
 func (suite *TimelineTestSuite) TestTimeline(t *testing.T) {
