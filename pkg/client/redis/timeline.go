@@ -979,31 +979,46 @@ func (t *redisTimeline) SetRetention(policy model.RetentionPolicy) error {
 
 // GetRetention returns the timeline's default retention policy.
 func (t *redisTimeline) GetRetention() model.RetentionPolicy {
+	// Lock-upgrade pattern: read cache with RLock, fetch from Redis without lock,
+	// then upgrade to write Lock only if caching new data. This prevents write-under-read-lock
+	// race with SetRetention() while maintaining read concurrency.
+	
+	// Read cached value under RLock
 	t.mu.RLock()
-	defer t.mu.RUnlock()
+	cached := t.retention
+	t.mu.RUnlock()
 
+	// Fetch data from Redis without holding lock
 	redisCli := t.cli.getRedisCli()
 	retentionKey := formatTimelineRetention(t.name)
 
 	ctx := context.Background()
 	data, err := redisCli.HGetAll(ctx, retentionKey).Result()
 
-	if err == nil && len(data) > 0 {
-		policy := model.RetentionPolicy{}
-		if maxCount, ok := data["max_count"]; ok {
-			policy.MaxCount = int(mustParseInt64(maxCount))
-		}
-		if maxDuration, ok := data["max_duration"]; ok {
-			policy.MaxDuration = time.Duration(mustParseInt64(maxDuration)) * time.Microsecond
-		}
-		if strategy, ok := data["strategy"]; ok {
-			policy.Strategy = model.RetentionStrategy(mustParseInt64(strategy))
-		}
-		t.retention = policy
-		return policy
+	// If no fresh data, return cached value
+	if err != nil || len(data) == 0 {
+		return cached
 	}
 
-	return t.retention
+	// Fresh data exists - parse and cache it under write lock
+	policy := model.RetentionPolicy{}
+	if maxCount, ok := data["max_count"]; ok {
+		policy.MaxCount = int(mustParseInt64(maxCount))
+	}
+	if maxDuration, ok := data["max_duration"]; ok {
+		policy.MaxDuration = time.Duration(mustParseInt64(maxDuration)) * time.Microsecond
+	}
+	if strategy, ok := data["strategy"]; ok {
+		policy.Strategy = model.RetentionStrategy(mustParseInt64(strategy))
+	}
+
+	// Acquire write lock to update cache
+	t.mu.Lock()
+	t.retention = policy
+	result := t.retention
+	t.mu.Unlock()
+
+	return result
 }
 
 // SetKeyRetention sets the retention policy for a specific key.
@@ -1043,34 +1058,50 @@ func (t *redisTimeline) SetKeyRetention(key string, policy model.RetentionPolicy
 
 // GetKeyRetention returns the retention policy for a specific key.
 func (t *redisTimeline) GetKeyRetention(key string) model.RetentionPolicy {
+	// Lock-upgrade pattern: read cache with RLock, fetch from Redis without lock,
+	// then upgrade to write Lock only if caching new data. This prevents write-under-read-lock
+	// race with SetKeyRetention(). Note: all map operations (reads and writes) must be
+	// under lock since Go maps are not safe for concurrent read+write.
+	
+	// Try cached value first under RLock
 	t.mu.RLock()
-	defer t.mu.RUnlock()
+	if cached, exists := t.keyRetentions[key]; exists {
+		t.mu.RUnlock()
+		return cached
+	}
+	fallback := t.retention
+	t.mu.RUnlock()
 
+	// Fetch data from Redis without holding lock
 	redisCli := t.cli.getRedisCli()
 	retentionKey := formatTimelineKeyRetention(t.name, key)
 
 	ctx := context.Background()
 	data, err := redisCli.HGetAll(ctx, retentionKey).Result()
 
-	if err == nil && len(data) > 0 {
-		policy := model.RetentionPolicy{}
-		if maxCount, ok := data["max_count"]; ok {
-			policy.MaxCount = int(mustParseInt64(maxCount))
-		}
-		if maxDuration, ok := data["max_duration"]; ok {
-			policy.MaxDuration = time.Duration(mustParseInt64(maxDuration)) * time.Microsecond
-		}
-		if strategy, ok := data["strategy"]; ok {
-			policy.Strategy = model.RetentionStrategy(mustParseInt64(strategy))
-		}
-		t.keyRetentions[key] = policy
-		return policy
+	// If no fresh data, return fallback
+	if err != nil || len(data) == 0 {
+		return fallback
 	}
 
-	if policy, ok := t.keyRetentions[key]; ok {
-		return policy
+	// Fresh data exists - parse it
+	policy := model.RetentionPolicy{}
+	if maxCount, ok := data["max_count"]; ok {
+		policy.MaxCount = int(mustParseInt64(maxCount))
 	}
-	return t.retention
+	if maxDuration, ok := data["max_duration"]; ok {
+		policy.MaxDuration = time.Duration(mustParseInt64(maxDuration)) * time.Microsecond
+	}
+	if strategy, ok := data["strategy"]; ok {
+		policy.Strategy = model.RetentionStrategy(mustParseInt64(strategy))
+	}
+
+	// Acquire write lock to update cache
+	t.mu.Lock()
+	t.keyRetentions[key] = policy
+	t.mu.Unlock()
+
+	return policy
 }
 
 // Helper function to parse int64 from string

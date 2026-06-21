@@ -151,10 +151,13 @@ func (doc *cacheDoc[T]) AddLabels(ctx context.Context, labelsOrig []string) erro
 		doc.labels[label] = true
 		validLabels = append(validLabels, label)
 	}
+	// Copy bucket pointer under lock before releasing to prevent TOCTOU race with Delete().
+	// The bucket has its own synchronization, so using the copy after unlock is safe.
+	bucket := doc.bucket
 	doc.Unlock()
 
-	if doc.bucket != nil && len(validLabels) > 0 {
-		doc.bucket.addLabels(doc.key, validLabels)
+	if bucket != nil && len(validLabels) > 0 {
+		bucket.addLabels(doc.key, validLabels)
 	}
 
 	return nil
@@ -179,10 +182,13 @@ func (doc *cacheDoc[T]) RemoveLabels(ctx context.Context, labelsOrig []string) e
 		delete(doc.labels, label)
 		validLabels = append(validLabels, label)
 	}
+	// Copy bucket pointer under lock before releasing to prevent TOCTOU race with Delete().
+	// The bucket has its own synchronization, so using the copy after unlock is safe.
+	bucket := doc.bucket
 	doc.Unlock()
 
-	if doc.bucket != nil && len(validLabels) > 0 {
-		doc.bucket.removeLabels(doc.key, validLabels)
+	if bucket != nil && len(validLabels) > 0 {
+		bucket.removeLabels(doc.key, validLabels)
 	}
 
 	return nil
