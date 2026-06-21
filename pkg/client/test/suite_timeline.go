@@ -57,12 +57,12 @@ func (suite *TimelineTestSuite) TestSparseFieldUpdates(t *testing.T) {
 	t1 := time.Now()
 	t2 := t1.Add(time.Second)
 
-	tl.Append(ctx, "key1", t1, map[string]string{
+	_ = tl.Append(ctx, "key1", t1, map[string]string{
 		"field1": "value1",
 		"field2": "value2",
 	}, false)
 
-	tl.Append(ctx, "key1", t2, map[string]string{
+	_ = tl.Append(ctx, "key1", t2, map[string]string{
 		"field1": "updated",
 	}, false)
 
@@ -79,7 +79,7 @@ func (suite *TimelineTestSuite) TestFieldConflicts(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	tl.Append(ctx, "key1", now, map[string]string{"field1": "value1"}, false)
+	_ = tl.Append(ctx, "key1", now, map[string]string{"field1": "value1"}, false)
 
 	// Should fail
 	err := tl.Append(ctx, "key1", now, map[string]string{"field1": "value2"}, false)
@@ -97,7 +97,7 @@ func (suite *TimelineTestSuite) TestTimestampNormalization(t *testing.T) {
 	ctx := context.Background()
 	ts := time.Date(2024, 6, 13, 10, 0, 0, 123456789, time.UTC)
 
-	tl.Append(ctx, "key1", ts, map[string]string{"field1": "value1"}, false)
+	_ = tl.Append(ctx, "key1", ts, map[string]string{"field1": "value1"}, false)
 
 	// Query with same time (nanoseconds should be truncated)
 	normResults, err := tl.GetExact(ctx, []string{"key1"}, ts)
@@ -113,8 +113,8 @@ func (suite *TimelineTestSuite) TestGetExact(t *testing.T) {
 	t1 := time.Now()
 	t2 := t1.Add(time.Second)
 
-	tl.Append(ctx, "key1", t1, map[string]string{"field1": "value1"}, false)
-	tl.Append(ctx, "key1", t2, map[string]string{"field2": "value2"}, false)
+	_ = tl.Append(ctx, "key1", t1, map[string]string{"field1": "value1"}, false)
+	_ = tl.Append(ctx, "key1", t2, map[string]string{"field2": "value2"}, false)
 
 	// Get exact t2 (should only have field2)
 	exactResults, err := tl.GetExact(ctx, []string{"key1"}, t2)
@@ -130,9 +130,9 @@ func (suite *TimelineTestSuite) TestGetRange(t *testing.T) {
 	ctx := context.Background()
 	base := time.Now()
 
-	tl.Append(ctx, "key1", base, map[string]string{"v": "1"}, false)
-	tl.Append(ctx, "key1", base.Add(time.Second), map[string]string{"v": "2"}, false)
-	tl.Append(ctx, "key1", base.Add(2*time.Second), map[string]string{"v": "3"}, false)
+	_ = tl.Append(ctx, "key1", base, map[string]string{"v": "1"}, false)
+	_ = tl.Append(ctx, "key1", base.Add(time.Second), map[string]string{"v": "2"}, false)
+	_ = tl.Append(ctx, "key1", base.Add(2*time.Second), map[string]string{"v": "3"}, false)
 
 	rangeResults, err := tl.GetRange(ctx, []string{"key1"}, base, base.Add(2*time.Second))
 	require.NoError(t, err)
@@ -146,8 +146,8 @@ func (suite *TimelineTestSuite) TestGetLatest(t *testing.T) {
 	ctx := context.Background()
 	base := time.Now()
 
-	tl.Append(ctx, "key1", base, map[string]string{"f1": "v1"}, false)
-	tl.Append(ctx, "key1", base.Add(time.Second), map[string]string{"f2": "v2"}, false)
+	_ = tl.Append(ctx, "key1", base, map[string]string{"f1": "v1"}, false)
+	_ = tl.Append(ctx, "key1", base.Add(time.Second), map[string]string{"f2": "v2"}, false)
 
 	latestResults, err := tl.GetLatest(ctx, []string{"key1"})
 	require.NoError(t, err)
@@ -162,8 +162,8 @@ func (suite *TimelineTestSuite) TestTimeline(t *testing.T) {
 	ctx := context.Background()
 	base := time.Now()
 
-	tl.Append(ctx, "key1", base, map[string]string{"v": "1"}, false)
-	tl.Append(ctx, "key1", base.Add(time.Second), map[string]string{"v": "2"}, false)
+	_ = tl.Append(ctx, "key1", base, map[string]string{"v": "1"}, false)
+	_ = tl.Append(ctx, "key1", base.Add(time.Second), map[string]string{"v": "2"}, false)
 
 	results, err := tl.Timeline(ctx, "key1")
 	require.NoError(t, err)
@@ -177,11 +177,11 @@ func (suite *TimelineTestSuite) TestGetAffectedRange(t *testing.T) {
 	ctx := context.Background()
 	base := time.Now()
 
-	tl.Append(ctx, "key1", base, map[string]string{"v": "1"}, false)
-	tl.Append(ctx, "key1", base.Add(2*time.Second), map[string]string{"v": "3"}, false)
+	_ = tl.Append(ctx, "key1", base, map[string]string{"v": "1"}, false)
+	_ = tl.Append(ctx, "key1", base.Add(2*time.Second), map[string]string{"v": "3"}, false)
 	
 	// Insert in between
-	tl.Insert(ctx, "key1", base.Add(time.Second), map[string]string{"v": "2"}, false)
+	_ = tl.Insert(ctx, "key1", base.Add(time.Second), map[string]string{"v": "2"}, false)
 
 	affected, err := tl.GetAffectedRange(ctx, "key1", base.Add(time.Second))
 	require.NoError(t, err)
@@ -195,14 +195,14 @@ func (suite *TimelineTestSuite) TestManagementOperations(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	tl.Append(ctx, "key1", now, map[string]string{"f": "v"}, false)
-	tl.Append(ctx, "key2", now, map[string]string{"f": "v"}, false)
+	_ = tl.Append(ctx, "key1", now, map[string]string{"f": "v"}, false)
+	_ = tl.Append(ctx, "key2", now, map[string]string{"f": "v"}, false)
 
 	keys, err := tl.Keys(ctx)
 	require.NoError(t, err)
 	assert.Len(t, keys, 2)
 
-	tl.Remove(ctx, []string{"key1"})
+	_ = tl.Remove(ctx, []string{"key1"})
 	keys, err = tl.Keys(ctx)
 	require.NoError(t, err)
 	assert.Len(t, keys, 1)
@@ -214,16 +214,16 @@ func (suite *TimelineTestSuite) TestRetentionPolicy(t *testing.T) {
 
 	ctx := context.Background()
 
-	tl.SetRetention(model.RetentionPolicy{
+	_ = tl.SetRetention(model.RetentionPolicy{
 		MaxCount:    2,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
 	})
 
 	base := time.Now()
-	tl.Append(ctx, "key1", base, map[string]string{"v": "1"}, false)
-	tl.Append(ctx, "key1", base.Add(time.Second), map[string]string{"v": "2"}, false)
-	tl.Append(ctx, "key1", base.Add(2*time.Second), map[string]string{"v": "3"}, false)
+	_ = tl.Append(ctx, "key1", base, map[string]string{"v": "1"}, false)
+	_ = tl.Append(ctx, "key1", base.Add(time.Second), map[string]string{"v": "2"}, false)
+	_ = tl.Append(ctx, "key1", base.Add(2*time.Second), map[string]string{"v": "3"}, false)
 
 	timeline, err := tl.Timeline(ctx, "key1")
 	require.NoError(t, err)

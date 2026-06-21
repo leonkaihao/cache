@@ -159,9 +159,8 @@ func (t *redisTimeline) GetAt(ctx context.Context, keys []string, ts time.Time) 
 		})
 	}
 
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		// Pipeline execution failed, but individual commands may have succeeded
-	}
+	// Pipeline execution may fail, but individual commands may have succeeded
+	_, _ = pipe.Exec(ctx)
 
 	// Phase 2: Collect timestamp results and build flat list of HGetAll operations
 	type hgetSpec struct {
@@ -198,9 +197,8 @@ func (t *redisTimeline) GetAt(ctx context.Context, keys []string, ts time.Time) 
 		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
 	}
 
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		// Pipeline execution failed, but individual commands may have succeeded
-	}
+	// Pipeline execution may fail, but individual commands may have succeeded
+	_, _ = pipe.Exec(ctx)
 
 	// Phase 4: Map HGetAll results back to keys, building merged state per key
 	keyMerged := make([]map[string]string, len(keys))
@@ -258,11 +256,8 @@ func (t *redisTimeline) GetExact(ctx context.Context, keys []string, ts time.Tim
 		cmds[i] = pipe.HGetAll(ctx, dataKey)
 	}
 
-	// Execute pipeline
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		// Pipeline execution failed, but individual commands may have succeeded
-		// Continue to process individual command results
-	}
+	// Execute pipeline - may fail, but individual commands may have succeeded
+	_, _ = pipe.Exec(ctx)
 
 	// Map results back to keys array
 	for i, cmd := range cmds {
@@ -308,9 +303,8 @@ func (t *redisTimeline) GetRange(ctx context.Context, keys []string, start, end 
 		})
 	}
 
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		// Continue processing individual results
-	}
+	// Pipeline execution may fail, but individual commands may have succeeded
+	_, _ = pipe.Exec(ctx)
 
 	// Phase 2: Pipeline all ZRangeArgs commands to fetch timestamps in [-inf, end]
 	pipe = redisCli.Pipeline()
@@ -325,9 +319,8 @@ func (t *redisTimeline) GetRange(ctx context.Context, keys []string, start, end 
 		})
 	}
 
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		// Continue processing individual results
-	}
+	// Pipeline execution may fail, but individual commands may have succeeded
+	_, _ = pipe.Exec(ctx)
 
 	// Collect results and determine all HGetAll operations needed for merging
 	type hgetSpec struct {
@@ -390,9 +383,8 @@ func (t *redisTimeline) GetRange(ctx context.Context, keys []string, start, end 
 		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
 	}
 
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		// Continue processing individual results
-	}
+	// Pipeline execution may fail, but individual commands may have succeeded
+	_, _ = pipe.Exec(ctx)
 
 	// Build complete merged states for each timestamp using pipelined data
 	type resultKey struct {
@@ -468,9 +460,8 @@ func (t *redisTimeline) GetLatest(ctx context.Context, keys []string) ([]map[str
 		zrangeCmds[i] = pipe.ZRange(ctx, tsKey, 0, -1)
 	}
 
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		// Pipeline execution failed, but individual commands may have succeeded
-	}
+	// Pipeline execution may fail, but individual commands may have succeeded
+	_, _ = pipe.Exec(ctx)
 
 	// Phase 2: Collect all timestamp results and build flat list of HGetAll operations
 	type hgetSpec struct {
@@ -507,9 +498,8 @@ func (t *redisTimeline) GetLatest(ctx context.Context, keys []string) ([]map[str
 		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
 	}
 
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		// Pipeline execution failed, but individual commands may have succeeded
-	}
+	// Pipeline execution may fail, but individual commands may have succeeded
+	_, _ = pipe.Exec(ctx)
 
 	// Phase 4: Map HGetAll results back to keys, building merged state per key
 	keyMerged := make([]map[string]string, len(keys))
@@ -662,9 +652,8 @@ func (t *redisTimeline) GetAffectedRange(ctx context.Context, key string, insert
 		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
 	}
 
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		// Continue processing individual results
-	}
+	// Pipeline execution may fail, but individual commands may have succeeded
+	_, _ = pipe.Exec(ctx)
 
 	// Phase 4: Build merged state for each affected timestamp using pipelined data
 	result := make([]*model.TimeValue, len(timestamps))
@@ -1087,6 +1076,6 @@ func (t *redisTimeline) GetKeyRetention(key string) model.RetentionPolicy {
 // Helper function to parse int64 from string
 func mustParseInt64(s string) int64 {
 	var result int64
-	fmt.Sscanf(s, "%d", &result)
+	_, _ = fmt.Sscanf(s, "%d", &result)
 	return result
 }

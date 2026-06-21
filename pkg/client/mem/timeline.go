@@ -651,8 +651,8 @@ func (t *memTimeline) enforceRetention(key string, td *timelineData) {
 		return
 	}
 
-	var countBoundary int = 0
-	var durationBoundary int = 0
+	var countBoundary = 0
+	var durationBoundary = 0
 
 	if policy.MaxCount > 0 && len(td.points) > policy.MaxCount {
 		countBoundary = len(td.points) - policy.MaxCount

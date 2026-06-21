@@ -17,7 +17,9 @@ func TestRedisTimeline_BasicOperations(t *testing.T) {
 
 	cli := NewClient("localhost:6379", "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
-	defer tl.Delete(context.Background())
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
 
 	ctx := context.Background()
 	now := time.Now()
@@ -43,7 +45,9 @@ func TestRedisTimeline_SparseUpdates(t *testing.T) {
 
 	cli := NewClient("localhost:6379", "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
-	defer tl.Delete(context.Background())
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
 
 	ctx := context.Background()
 	t1 := time.Now()
@@ -84,7 +88,9 @@ func TestRedisTimeline_Labels(t *testing.T) {
 
 	cli := NewClient("localhost:6379", "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
-	defer tl.Delete(context.Background())
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
 
 	ctx := context.Background()
 	now := time.Now()
@@ -114,7 +120,9 @@ func TestRedisTimeline_KeysWithLabelFilter(t *testing.T) {
 
 	cli := NewClient("localhost:6379", "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
-	defer tl.Delete(context.Background())
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
 
 	ctx := context.Background()
 	now := time.Now()
@@ -148,7 +156,9 @@ func TestRedisTimeline_LabelCleanupOnRemove(t *testing.T) {
 
 	cli := NewClient("localhost:6379", "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
-	defer tl.Delete(context.Background())
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
 
 	ctx := context.Background()
 	now := time.Now()
@@ -172,7 +182,9 @@ func TestRedisTimeline_BatchGetLatest(t *testing.T) {
 
 	cli := NewClient("localhost:6379", "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
-	defer tl.Delete(context.Background())
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
 
 	ctx := context.Background()
 	t1 := time.Now()
@@ -193,7 +205,9 @@ func TestRedisTimeline_BatchGetAt(t *testing.T) {
 
 	cli := NewClient("localhost:6379", "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
-	defer tl.Delete(context.Background())
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
 
 	ctx := context.Background()
 	t1 := time.Now()

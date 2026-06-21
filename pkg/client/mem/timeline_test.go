@@ -157,9 +157,9 @@ func TestTimeline_RetentionPolicy(t *testing.T) {
 
 	// Add 3 points
 	t1 := time.Now()
-	tl.Append(ctx, "key1", t1, map[string]string{"v": "1"}, false)
-	tl.Append(ctx, "key1", t1.Add(time.Second), map[string]string{"v": "2"}, false)
-	tl.Append(ctx, "key1", t1.Add(2*time.Second), map[string]string{"v": "3"}, false)
+	_ = tl.Append(ctx, "key1", t1, map[string]string{"v": "1"}, false)
+	_ = tl.Append(ctx, "key1", t1.Add(time.Second), map[string]string{"v": "2"}, false)
+	_ = tl.Append(ctx, "key1", t1.Add(2*time.Second), map[string]string{"v": "3"}, false)
 
 	// Should only have 2 points (last 2)
 	timeline, err := tl.Timeline(ctx, "key1")
@@ -178,7 +178,7 @@ func TestTimeline_Concurrency(t *testing.T) {
 	done := make(chan bool, 10)
 	for i := 0; i < 10; i++ {
 		go func(n int) {
-			tl.Append(ctx, "key1", now, map[string]string{
+			_ = tl.Append(ctx, "key1", now, map[string]string{
 				fmt.Sprintf("field%d", n): "value",
 			}, false)
 			done <- true
@@ -215,8 +215,8 @@ func TestTimeline_ManagementOperations(t *testing.T) {
 	now := time.Now()
 
 	// Add data
-	tl.Append(ctx, "key1", now, map[string]string{"f": "v"}, false)
-	tl.Append(ctx, "key2", now, map[string]string{"f": "v"}, false)
+	_ = tl.Append(ctx, "key1", now, map[string]string{"f": "v"}, false)
+	_ = tl.Append(ctx, "key2", now, map[string]string{"f": "v"}, false)
 
 	// Test Keys()
 	keys, err := tl.Keys(ctx)
