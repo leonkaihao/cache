@@ -176,31 +176,41 @@ func (s *TestSuite) TestExpiration(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = bkt.Delete(ctx) }()
 
-	// Create doc with expiration
-	expired := false
+	// Test that callback fires after expiration (500ms timeout, 1s verification window)
+	// Buffered channel for race-free callback coordination
+	expiredCh := make(chan model.CacheDoc, 1)
 	doc, err := bkt.Update(ctx, "key1", &TestData{"val1"})
 	require.NoError(t, err)
 
 	require.NoError(t, doc.Expire(500*time.Millisecond, func(d model.CacheDoc) {
-		expired = true
+		expiredCh <- d
 	}))
 
-	// Wait for expiration
-	time.Sleep(1 * time.Second)
-	assert.True(t, expired, "expiration callback should fire")
+	select {
+	case d := <-expiredCh:
+		assert.NotNil(t, d, "callback should receive non-nil document")
+		assert.Equal(t, "key1", d.Key(), "callback should receive correct document")
+	case <-time.After(1 * time.Second):
+		t.Fatal("expiration callback did not fire within timeout")
+	}
 
-	// Test canceling expiration
-	expired = false
+	// Test canceling expiration - separate channel to prevent cross-contamination
+	canceledCh := make(chan model.CacheDoc, 1)
 	doc2, err := bkt.Update(ctx, "key2", &TestData{"val2"})
 	require.NoError(t, err)
 
 	require.NoError(t, doc2.Expire(500*time.Millisecond, func(d model.CacheDoc) {
-		expired = true
+		canceledCh <- d
 	}))
 
 	require.NoError(t, doc2.CancelExpire())
-	time.Sleep(1 * time.Second)
-	assert.False(t, expired, "expiration callback should not fire after cancel")
+
+	select {
+	case <-canceledCh:
+		t.Fatal("expiration callback should not fire after cancel")
+	case <-time.After(1 * time.Second):
+		// Success: callback did not fire
+	}
 }
 
 // TestCollections tests collection operations
