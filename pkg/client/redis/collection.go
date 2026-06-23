@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
 	"github.com/leonkaihao/cache/pkg/consts"
 	"github.com/leonkaihao/cache/pkg/model"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 type collection struct {
@@ -226,6 +226,11 @@ func (clt *collection) clearAll(ctx context.Context) error {
 		if err := cli.Del(ctx, memberKeys...).Err(); err != nil {
 			return fmt.Errorf("fail to delete collection members: %w", err)
 		}
+	}
+
+	// Clear the keys set itself
+	if err := cli.Del(ctx, formatCollectionKeys(clt)).Err(); err != nil {
+		return fmt.Errorf("fail to delete collection keys set: %w", err)
 	}
 
 	return nil

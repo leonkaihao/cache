@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/leonkaihao/cache/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/leonkaihao/cache/pkg/model"
 )
 
 // TestData is a simple test data structure
@@ -131,7 +131,9 @@ func (s *TestSuite) TestTimestamps(t *testing.T) {
 	defer func() { _ = bkt.Delete(ctx) }()
 
 	// Create with timestamp
-	ts1 := time.Now()
+	// Note: Strip monotonic clock with Truncate(0) since persistence layers
+	// (like Redis) serialize only wall clock time, not monotonic readings
+	ts1 := time.Now().Truncate(0)
 	doc, updated, err := bkt.UpdateWithTs(ctx, "key1", &TestData{"val1"}, ts1)
 	require.NoError(t, err)
 	require.True(t, updated)
