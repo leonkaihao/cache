@@ -81,7 +81,7 @@ func (doc *cacheDoc[T]) SetValueWithTs(ctx context.Context, val any, ts time.Tim
 		return false, nil
 	}
 
-	doc.ts = ts
+	doc.ts = ts.UTC()
 	doc.val = val
 	return true, nil
 }
@@ -98,7 +98,7 @@ func (doc *cacheDoc[T]) WithTime(ctx context.Context, tm time.Time) error {
 		return fmt.Errorf("document has been deleted")
 	}
 
-	doc.ts = tm
+	doc.ts = tm.UTC()
 	return nil
 }
 

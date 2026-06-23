@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
 	"github.com/leonkaihao/cache/pkg/model"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 const (
@@ -121,7 +121,7 @@ func (doc *cacheDoc[T]) SetValueWithTs(ctx context.Context, val any, ts time.Tim
 
 	// Update both fields atomically
 	pipe := redisCli.Pipeline()
-	pipe.HSet(ctx, newKey, CACHEDOC_TS, ts.Format(time.RFC3339Nano))
+	pipe.HSet(ctx, newKey, CACHEDOC_TS, ts.UTC().Format(time.RFC3339Nano))
 	pipe.HSet(ctx, newKey, CACHEDOC_VAL, string(data))
 	if _, err := pipe.Exec(ctx); err != nil {
 		return false, fmt.Errorf("fail to update doc: %w", err)
@@ -141,7 +141,7 @@ func (doc *cacheDoc[T]) WithTime(ctx context.Context, ts time.Time) error {
 	redisCli := doc.bucket.cli.getRedisCli()
 	newKey := formatDocKey(doc.bucket, doc.key)
 
-	if err := redisCli.HSet(ctx, newKey, CACHEDOC_TS, ts.Format(time.RFC3339Nano)).Err(); err != nil {
+	if err := redisCli.HSet(ctx, newKey, CACHEDOC_TS, ts.UTC().Format(time.RFC3339Nano)).Err(); err != nil {
 		return fmt.Errorf("fail to set timestamp of cache doc %v: %w", newKey, err)
 	}
 

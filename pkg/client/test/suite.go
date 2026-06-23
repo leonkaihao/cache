@@ -131,9 +131,9 @@ func (s *TestSuite) TestTimestamps(t *testing.T) {
 	defer func() { _ = bkt.Delete(ctx) }()
 
 	// Create with timestamp
-	// Note: Strip monotonic clock with Truncate(0) since persistence layers
-	// (like Redis) serialize only wall clock time, not monotonic readings
-	ts1 := time.Now().Truncate(0)
+	// Note: Use UTC and strip monotonic clock with Truncate(0) for consistent
+	// timestamp handling across different environments and persistence layers
+	ts1 := time.Now().UTC().Truncate(0)
 	doc, updated, err := bkt.UpdateWithTs(ctx, "key1", &TestData{"val1"}, ts1)
 	require.NoError(t, err)
 	require.True(t, updated)
