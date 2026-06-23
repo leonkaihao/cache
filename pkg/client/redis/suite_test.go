@@ -14,11 +14,11 @@ func TestRedisSuite(t *testing.T) {
 	suite := test.TestSuite{
 		Name: "Redis",
 		BucketFactory: func() (model.CacheBucket, error) {
-			cli := NewClient("localhost:6379", "admin", 1)
+			cli := NewClient(getRedisAddr(), "admin", 1)
 			return NewBucket[test.TestData](cli, "test_suite", coding.NewJsonCoder())
 		},
 		ClientFactory: func() model.CacheClient {
-			return NewClient("localhost:6379", "admin", 1)
+			return NewClient(getRedisAddr(), "admin", 1)
 		},
 	}
 	suite.RunAll(t)

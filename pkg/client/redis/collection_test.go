@@ -13,7 +13,7 @@ import (
 
 func Test_collection_Keys(t *testing.T) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	clt := cli.Collection("xxx")
 	defer clt.Delete(ctx)
 
@@ -65,7 +65,7 @@ func Test_collection_Keys(t *testing.T) {
 // Test that Add() rejects empty members
 func TestCollectionAddEmptyMembers(t *testing.T) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	clt := cli.Collection("test")
 	defer clt.Delete(ctx)
 
@@ -77,7 +77,7 @@ func TestCollectionAddEmptyMembers(t *testing.T) {
 // Test that Add() rejects empty key
 func TestCollectionAddEmptyKey(t *testing.T) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	clt := cli.Collection("test")
 	defer clt.Delete(ctx)
 

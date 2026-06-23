@@ -1,3 +1,6 @@
+//go:build integration
+// +build integration
+
 package redis
 
 import (
@@ -8,9 +11,7 @@ import (
 )
 
 func BenchmarkRedisTimeline_Append(b *testing.B) {
-	b.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -26,9 +27,7 @@ func BenchmarkRedisTimeline_Append(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetAt(b *testing.B) {
-	b.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -50,9 +49,7 @@ func BenchmarkRedisTimeline_GetAt(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetAt_MultiKey(b *testing.B) {
-	b.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -81,9 +78,7 @@ func BenchmarkRedisTimeline_GetAt_MultiKey(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetExact(b *testing.B) {
-	b.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -110,9 +105,7 @@ func BenchmarkRedisTimeline_GetExact(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetLatest(b *testing.B) {
-	b.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline_latest")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -141,9 +134,7 @@ func BenchmarkRedisTimeline_GetLatest(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetAffectedRange(b *testing.B) {
-	b.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline_affected")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -171,9 +162,7 @@ func BenchmarkRedisTimeline_GetAffectedRange(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetRange(b *testing.B) {
-	b.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline_exact")
 	defer func() {
 		_ = tl.Delete(context.Background())

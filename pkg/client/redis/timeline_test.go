@@ -1,3 +1,6 @@
+//go:build integration
+// +build integration
+
 package redis
 
 import (
@@ -10,12 +13,10 @@ import (
 )
 
 // Note: These tests require a running Redis instance
-// Run with: go test -tags=redis
+// Run with: go test -tags=integration
 
 func TestRedisTimeline_BasicOperations(t *testing.T) {
-	t.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -41,9 +42,7 @@ func TestRedisTimeline_BasicOperations(t *testing.T) {
 }
 
 func TestRedisTimeline_SparseUpdates(t *testing.T) {
-	t.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -84,9 +83,7 @@ func TestRedisTimeline_RetentionPolicy(t *testing.T) {
 // --- 8.5: Redis timeline label operations ---
 
 func TestRedisTimeline_Labels(t *testing.T) {
-	t.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -116,9 +113,7 @@ func TestRedisTimeline_Labels(t *testing.T) {
 }
 
 func TestRedisTimeline_KeysWithLabelFilter(t *testing.T) {
-	t.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -152,9 +147,7 @@ func TestRedisTimeline_KeysWithLabelFilter(t *testing.T) {
 }
 
 func TestRedisTimeline_LabelCleanupOnRemove(t *testing.T) {
-	t.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -178,9 +171,7 @@ func TestRedisTimeline_LabelCleanupOnRemove(t *testing.T) {
 // --- 8.6: Redis timeline batch query ---
 
 func TestRedisTimeline_BatchGetLatest(t *testing.T) {
-	t.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
 	defer func() {
 		_ = tl.Delete(context.Background())
@@ -201,9 +192,7 @@ func TestRedisTimeline_BatchGetLatest(t *testing.T) {
 }
 
 func TestRedisTimeline_BatchGetAt(t *testing.T) {
-	t.Skip("Requires Redis instance")
-
-	cli := NewClient("localhost:6379", "", 0).(*client)
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("test_timeline")
 	defer func() {
 		_ = tl.Delete(context.Background())

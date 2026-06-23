@@ -42,10 +42,15 @@ jobs:
       run: go mod verify
 
     - name: Run tests
-      run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+      run: make test
 
     - name: Run integration tests
-      run: go test -v --tags=integration ./...
+      run: make test/integration
+      env:
+        REDIS_ADDR: localhost:6379
+
+    - name: Run benchmark tests
+      run: make test/bench-integration
       env:
         REDIS_ADDR: localhost:6379
 

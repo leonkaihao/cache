@@ -31,7 +31,7 @@ func expectFilter(t *testing.T, bkt model.CacheBucket, filters [][]string, sz in
 
 func TestBucket(t *testing.T) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, err := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
 	require.NoError(t, err)
 	cli.WithBucket(bkt)
@@ -111,7 +111,7 @@ func TestBucket(t *testing.T) {
 
 func TestDoc(t *testing.T) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, err := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
 	require.NoError(t, err)
 	cli.WithBucket(bkt)
@@ -171,7 +171,7 @@ func TestDoc(t *testing.T) {
 
 func TestScan(t *testing.T) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, err := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
 	require.NoError(t, err)
 	cli.WithBucket(bkt)
@@ -239,7 +239,7 @@ type testInt struct {
 
 func TestBucketConcurrent(t *testing.T) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, err := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
 	require.NoError(t, err)
 	cli.WithBucket(bkt)
@@ -287,7 +287,7 @@ func TestBucketConcurrent(t *testing.T) {
 // Test configurable timeout with WithTimeout option
 func TestCustomTimeout(t *testing.T) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1, WithTimeout(5*time.Second))
+	cli := NewClient(getRedisAddr(), "admin", 1, WithTimeout(5*time.Second))
 	bkt, err := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
 	require.NoError(t, err)
 	cli.WithBucket(bkt)
@@ -300,7 +300,7 @@ func TestCustomTimeout(t *testing.T) {
 
 // Test context deadline override
 func TestContextDeadlineOverride(t *testing.T) {
-	cli := NewClient("localhost:6379", "admin", 1, WithTimeout(10*time.Second))
+	cli := NewClient(getRedisAddr(), "admin", 1, WithTimeout(10*time.Second))
 	bkt, err := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
 	require.NoError(t, err)
 	cli.WithBucket(bkt)
@@ -332,7 +332,7 @@ func TestRedisErrorHandling(t *testing.T) {
 
 func BenchmarkUpdateData(b *testing.B) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, _ := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
 	cli.WithBucket(bkt)
 	defer bkt.Clear(ctx)
@@ -348,7 +348,7 @@ func BenchmarkUpdateData(b *testing.B) {
 
 func BenchmarkUpdateDataWithTs(b *testing.B) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, _ := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
 	cli.WithBucket(bkt)
 	defer bkt.Clear(ctx)
@@ -363,7 +363,7 @@ func BenchmarkUpdateDataWithTs(b *testing.B) {
 
 func BenchmarkFilter1000Label1(b *testing.B) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, _ := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
 	cli.WithBucket(bkt)
 	defer bkt.Clear(ctx)
@@ -384,7 +384,7 @@ func BenchmarkFilter1000Label1(b *testing.B) {
 
 func BenchmarkFilter1000Label8(b *testing.B) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, _ := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
 	cli.WithBucket(bkt)
 	defer bkt.Clear(ctx)
@@ -405,7 +405,7 @@ func BenchmarkFilter1000Label8(b *testing.B) {
 
 func BenchmarkFetchValue(b *testing.B) {
 	ctx := context.Background()
-	cli := NewClient("localhost:6379", "admin", 1)
+	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, _ := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
 	cli.WithBucket(bkt)
 	defer bkt.Clear(ctx)
