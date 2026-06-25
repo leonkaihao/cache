@@ -44,22 +44,66 @@ jobs:
     - name: Run tests
       run: make test
 
+    - name: Upload results to Codecov
+      uses: codecov/codecov-action@v5
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
     - name: Run integration tests
       run: make test/integration
       env:
         REDIS_ADDR: localhost:6379
 
-    - name: Run benchmark tests
+  benchmark:
+    name: Continuous Benchmarking
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: '1.23'
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run benchmarks
       run: make test/bench-integration
       env:
         REDIS_ADDR: localhost:6379
-
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
-      with:
-        file: ./coverage.txt
-        flags: unittests
-        name: codecov-umbrella
+        
+    - uses: bencherdev/bencher@main
+    - name: Track base branch benchmarks with Bencher
+      run: |
+        bencher run \
+        --project project-leonkaihao-cache \
+        --key '${{ secrets.BENCHER_API_KEY }}' \
+        --branch main \
+        --testbed ubuntu-latest \
+        --threshold-measure latency \
+        --threshold-test t_test \
+        --threshold-max-sample-size 64 \
+        --threshold-upper-boundary 0.99 \
+        --thresholds-reset \
+        --error-on-alert \
+        --adapter json \
+        --github-actions '${{ secrets.GITHUB_TOKEN }}' \
+        bencher mock
 
   lint:
     name: Lint
