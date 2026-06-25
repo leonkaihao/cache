@@ -132,7 +132,14 @@ func (t *redisTimeline) Append(ctx context.Context, key string, ts time.Time, da
 		return fmt.Errorf("failed to update global timestamp index: %w", err)
 	}
 
-	// TODO: Enforce retention policy (task-042)
+	// Enforce retention policy (best-effort)
+	// Data is already written successfully; if cleanup fails, log but don't fail the write
+	if err := t.enforceRetention(ctx, key); err != nil {
+		Logger.Error("retention enforcement failed",
+			"key", key,
+			"timeline", t.name,
+			"error", err)
+	}
 
 	return nil
 }
@@ -1149,6 +1156,134 @@ func (t *redisTimeline) GetUpdatedKeys(ctx context.Context, after time.Time) ([]
 	}
 
 	return keys, nil
+}
+
+// getRetentionForKey returns the retention policy for a key (timeline default or key-specific override).
+// Uses memory cache for zero Redis overhead.
+func (t *redisTimeline) getRetentionForKey(key string) model.RetentionPolicy {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	// Check for key-specific policy
+	if policy, exists := t.keyRetentions[key]; exists {
+		return policy
+	}
+
+	// Return timeline default
+	return t.retention
+}
+
+// calculateRemovalBoundary calculates how many time points to remove from the beginning
+// of the timeline to satisfy the retention policy. Returns 0 if no removal needed.
+// Algorithm ported from pkg/client/mem/timeline.go:671-728
+func (t *redisTimeline) calculateRemovalBoundary(timestamps []redis.Z, policy model.RetentionPolicy) int {
+	if len(timestamps) == 0 {
+		return 0
+	}
+
+	var countBoundary = 0
+	var durationBoundary = 0
+
+	// Calculate count boundary: remove oldest points to stay within MaxCount
+	if policy.MaxCount > 0 && len(timestamps) > policy.MaxCount {
+		countBoundary = len(timestamps) - policy.MaxCount
+	}
+
+	// Calculate duration boundary: remove points older than MaxDuration
+	if policy.MaxDuration > 0 {
+		mostRecentTs := int64(timestamps[len(timestamps)-1].Score)
+		cutoffTs := mostRecentTs - policy.MaxDuration.Microseconds()
+
+		// Reverse scan to find first timestamp below cutoff
+		for i := len(timestamps) - 1; i >= 0; i-- {
+			if int64(timestamps[i].Score) < cutoffTs {
+				durationBoundary = i + 1
+				break
+			}
+		}
+	}
+
+	// Apply strategy to determine final boundary
+	var removeBeforeIdx int
+	if policy.MaxCount == 0 {
+		// Duration only
+		removeBeforeIdx = durationBoundary
+	} else if policy.MaxDuration == 0 {
+		// Count only
+		removeBeforeIdx = countBoundary
+	} else {
+		// Both constraints: apply strategy
+		if policy.Strategy == model.RetentionMax {
+			// Keep MORE data (remove LESS): use minimum boundary
+			if countBoundary < durationBoundary {
+				removeBeforeIdx = countBoundary
+			} else {
+				removeBeforeIdx = durationBoundary
+			}
+		} else {
+			// RetentionMin: Keep LESS data (remove MORE): use maximum boundary
+			if countBoundary > durationBoundary {
+				removeBeforeIdx = countBoundary
+			} else {
+				removeBeforeIdx = durationBoundary
+			}
+		}
+	}
+
+	return removeBeforeIdx
+}
+
+// enforceRetention removes old time points from Redis to satisfy the retention policy.
+// This method is called after every Append/Insert operation (best-effort semantics).
+func (t *redisTimeline) enforceRetention(ctx context.Context, key string) error {
+	// Step 1: Get retention policy from memory cache (zero Redis overhead)
+	policy := t.getRetentionForKey(key)
+
+	// Fast path: no retention configured
+	if policy.MaxCount == 0 && policy.MaxDuration == 0 {
+		return nil
+	}
+
+	// Step 2: Get current timestamps from Redis
+	redisCli := t.cli.getRedisCli()
+	tsKey := formatTimelineTS(t.name, key)
+
+	timestamps, err := redisCli.ZRangeWithScores(ctx, tsKey, 0, -1).Result()
+	if err != nil {
+		return fmt.Errorf("failed to get timestamps: %w", err)
+	}
+
+	if len(timestamps) == 0 {
+		return nil // Nothing to enforce
+	}
+
+	// Step 3: Calculate removal boundary
+	removeBeforeIdx := t.calculateRemovalBoundary(timestamps, policy)
+
+	if removeBeforeIdx == 0 {
+		return nil // No cleanup needed
+	}
+
+	// Step 4: Pipeline cleanup operations
+	pipe := redisCli.Pipeline()
+
+	// Remove old timestamps from ZSET
+	oldestScore := int64(timestamps[0].Score)
+	boundaryScore := int64(timestamps[removeBeforeIdx-1].Score)
+	pipe.ZRemRangeByScore(ctx, tsKey,
+		fmt.Sprintf("%d", oldestScore),
+		fmt.Sprintf("%d", boundaryScore))
+
+	// Remove corresponding data HASHes
+	for i := 0; i < removeBeforeIdx; i++ {
+		tsMicros := int64(timestamps[i].Score)
+		dataKey := formatTimelineData(t.name, key, tsMicros)
+		pipe.Del(ctx, dataKey)
+	}
+
+	// Execute pipeline
+	_, err = pipe.Exec(ctx)
+	return err
 }
 
 // Helper function to parse int64 from string

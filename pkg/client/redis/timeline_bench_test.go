@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/leonkaihao/cache/pkg/model"
 )
 
 func BenchmarkRedisTimeline_Append(b *testing.B) {
@@ -250,5 +252,206 @@ func BenchmarkRedisTimeline_Append_WithGlobalIndex(b *testing.B) {
 			"field": fmt.Sprintf("value%d", i),
 		}, false)
 	}
+}
+
+// --- Retention benchmarks ---
+
+func BenchmarkRedisTimeline_AppendNoRetention(b *testing.B) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("bench_no_retention")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+	ctx := context.Background()
+
+	// No retention policy set
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = tl.Append(ctx, "key1", time.Now().Add(time.Duration(i)*time.Millisecond), map[string]string{
+			"field": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+}
+
+func BenchmarkRedisTimeline_AppendWithRetention_NoCleanup(b *testing.B) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("bench_retention_no_cleanup")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+	ctx := context.Background()
+
+	// Set retention but within limits (no cleanup needed)
+	_ = tl.SetRetention(model.RetentionPolicy{
+		MaxCount:    1000,
+		MaxDuration: 1 * time.Hour,
+		Strategy:    model.RetentionMax,
+	})
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = tl.Append(ctx, "key1", time.Now().Add(time.Duration(i)*time.Millisecond), map[string]string{
+			"field": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+}
+
+func BenchmarkRedisTimeline_AppendWithRetention_WithCleanup(b *testing.B) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("bench_retention_cleanup")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+	ctx := context.Background()
+
+	// Set strict retention that triggers cleanup on every write
+	_ = tl.SetRetention(model.RetentionPolicy{
+		MaxCount:    10,
+		MaxDuration: 0,
+		Strategy:    model.RetentionMax,
+	})
+
+	// Pre-populate to ensure cleanup happens on each iteration
+	base := time.Now()
+	for i := 0; i < 15; i++ {
+		_ = tl.Append(ctx, "key1", base.Add(time.Duration(i)*time.Millisecond), map[string]string{
+			"field": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ts := base.Add(time.Duration(15+i) * time.Millisecond)
+		_ = tl.Append(ctx, "key1", ts, map[string]string{
+			"field": fmt.Sprintf("value%d", 15+i),
+		}, false)
+	}
+}
+
+func BenchmarkRedisTimeline_RetentionCleanup_SmallDataset(b *testing.B) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("bench_retention_small")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+	ctx := context.Background()
+
+	// Setup: 10 points with MaxCount=5
+	_ = tl.SetRetention(model.RetentionPolicy{
+		MaxCount:    5,
+		MaxDuration: 0,
+		Strategy:    model.RetentionMax,
+	})
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		_ = tl.Delete(ctx)
+		base := time.Now()
+		for j := 0; j < 10; j++ {
+			_ = tl.Append(ctx, "key1", base.Add(time.Duration(j)*time.Millisecond), map[string]string{
+				"field": fmt.Sprintf("value%d", j),
+			}, false)
+		}
+		b.StartTimer()
+		
+		// This write triggers cleanup of 5 points
+		_ = tl.Append(ctx, "key1", base.Add(11*time.Millisecond), map[string]string{
+			"field": "value11",
+		}, false)
+	}
+}
+
+func BenchmarkRedisTimeline_RetentionCleanup_LargeDataset(b *testing.B) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("bench_retention_large")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+	ctx := context.Background()
+
+	// Setup: 1000 points with MaxCount=100
+	_ = tl.SetRetention(model.RetentionPolicy{
+		MaxCount:    100,
+		MaxDuration: 0,
+		Strategy:    model.RetentionMax,
+	})
+
+	base := time.Now()
+	for i := 0; i < 1000; i++ {
+		_ = tl.Append(ctx, "key1", base.Add(time.Duration(i)*time.Millisecond), map[string]string{
+			"field": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ts := base.Add(time.Duration(1000+i) * time.Millisecond)
+		_ = tl.Append(ctx, "key1", ts, map[string]string{
+			"field": fmt.Sprintf("value%d", 1000+i),
+		}, false)
+	}
+}
+
+func BenchmarkRedisTimeline_RetentionStrategies(b *testing.B) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	
+	b.Run("RetentionMax", func(b *testing.B) {
+		tl := cli.Timeline("bench_retention_max")
+		defer func() {
+			_ = tl.Delete(context.Background())
+		}()
+		ctx := context.Background()
+
+		_ = tl.SetRetention(model.RetentionPolicy{
+			MaxCount:    10,
+			MaxDuration: 100 * time.Millisecond,
+			Strategy:    model.RetentionMax,
+		})
+
+		base := time.Now()
+		for i := 0; i < 20; i++ {
+			_ = tl.Append(ctx, "key1", base.Add(time.Duration(i)*10*time.Millisecond), map[string]string{
+				"field": fmt.Sprintf("value%d", i),
+			}, false)
+		}
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			ts := base.Add(time.Duration(20+i) * 10 * time.Millisecond)
+			_ = tl.Append(ctx, "key1", ts, map[string]string{
+				"field": fmt.Sprintf("value%d", 20+i),
+			}, false)
+		}
+	})
+
+	b.Run("RetentionMin", func(b *testing.B) {
+		tl := cli.Timeline("bench_retention_min")
+		defer func() {
+			_ = tl.Delete(context.Background())
+		}()
+		ctx := context.Background()
+
+		_ = tl.SetRetention(model.RetentionPolicy{
+			MaxCount:    10,
+			MaxDuration: 100 * time.Millisecond,
+			Strategy:    model.RetentionMin,
+		})
+
+		base := time.Now()
+		for i := 0; i < 20; i++ {
+			_ = tl.Append(ctx, "key1", base.Add(time.Duration(i)*10*time.Millisecond), map[string]string{
+				"field": fmt.Sprintf("value%d", i),
+			}, false)
+		}
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			ts := base.Add(time.Duration(20+i) * 10 * time.Millisecond)
+			_ = tl.Append(ctx, "key1", ts, map[string]string{
+				"field": fmt.Sprintf("value%d", 20+i),
+			}, false)
+		}
+	})
 }
 

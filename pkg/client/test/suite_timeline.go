@@ -229,7 +229,15 @@ func (suite *TimelineTestSuite) TestRetentionPolicy(t *testing.T) {
 
 	timeline, err := tl.Timeline(ctx, "key1")
 	require.NoError(t, err)
-	assert.LessOrEqual(t, len(timeline), 2)
+	
+	// Strong assertion: exactly 2 points should remain
+	assert.Equal(t, 2, len(timeline), "retention should keep exactly 2 points")
+	
+	// Verify correct points remain (last 2)
+	if len(timeline) == 2 {
+		assert.Equal(t, "2", timeline[0].Value["v"], "first point should be '2'")
+		assert.Equal(t, "3", timeline[1].Value["v"], "second point should be '3'")
+	}
 }
 
 func (suite *TimelineTestSuite) TestContextCancellation(t *testing.T) {
