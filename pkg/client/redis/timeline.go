@@ -56,6 +56,10 @@ func formatTimelineKeyLabels(name, key string) string {
 	return fmt.Sprintf("%s%s/%s%s/%s", consts.TIMELINE_PREFIX, name, consts.KEYS_PREFIX, key, consts.LABELS_PREFIX)
 }
 
+func formatTimelineGlobalTS(name string) string {
+	return fmt.Sprintf("%s%s/%s", consts.TIMELINE_PREFIX, name, consts.GLOBAL_TS_SUFFIX)
+}
+
 // normalizeTimestamp truncates a time.Time to microsecond precision and returns microseconds since epoch.
 func normalizeTimestamp(ts time.Time) int64 {
 	return ts.Truncate(time.Microsecond).UnixMicro()
@@ -92,6 +96,7 @@ func (t *redisTimeline) Append(ctx context.Context, key string, ts time.Time, da
 	dataKey := formatTimelineData(t.name, key, tsMicros)
 	tsKey := formatTimelineTS(t.name, key)
 	keysKey := formatTimelineKeys(t.name)
+	globalTSKey := formatTimelineGlobalTS(t.name)
 
 	// Check for field conflicts if force=false
 	if !force {
@@ -120,6 +125,11 @@ func (t *redisTimeline) Append(ctx context.Context, key string, ts time.Time, da
 	// Add key to keys set
 	if err := redisCli.SAdd(ctx, keysKey, key).Err(); err != nil {
 		return fmt.Errorf("failed to add key to set: %w", err)
+	}
+
+	// Update global timestamp index
+	if err := redisCli.ZAdd(ctx, globalTSKey, redis.Z{Score: float64(tsMicros), Member: key}).Err(); err != nil {
+		return fmt.Errorf("failed to update global timestamp index: %w", err)
 	}
 
 	// TODO: Enforce retention policy (task-042)
@@ -858,6 +868,7 @@ func (t *redisTimeline) Remove(ctx context.Context, keys []string) error {
 
 	redisCli := t.cli.getRedisCli()
 	keysKey := formatTimelineKeys(t.name)
+	globalTSKey := formatTimelineGlobalTS(t.name)
 
 	for _, key := range keys {
 		// Read forward label index to clean up inverted index.
@@ -878,6 +889,8 @@ func (t *redisTimeline) Remove(ctx context.Context, keys []string) error {
 		pipe.SRem(ctx, keysKey, key)
 		// Delete timestamps ZSET.
 		pipe.Del(ctx, formatTimelineTS(t.name, key))
+		// Remove from global timestamp index.
+		pipe.ZRem(ctx, globalTSKey, key)
 
 		if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 			return fmt.Errorf("failed to remove key %s: %w", key, err)
@@ -932,6 +945,12 @@ func (t *redisTimeline) Clear(ctx context.Context) error {
 	retentionKey := formatTimelineRetention(t.name)
 	if err := redisCli.Del(ctx, retentionKey).Err(); err != nil {
 		return fmt.Errorf("failed to delete retention: %w", err)
+	}
+
+	// Clear global timestamp index.
+	globalTSKey := formatTimelineGlobalTS(t.name)
+	if err := redisCli.Del(ctx, globalTSKey).Err(); err != nil {
+		return fmt.Errorf("failed to delete global timestamp index: %w", err)
 	}
 
 	return nil
@@ -1102,6 +1121,34 @@ func (t *redisTimeline) GetKeyRetention(key string) model.RetentionPolicy {
 	t.mu.Unlock()
 
 	return policy
+}
+
+// GetUpdatedKeys returns all keys that have been updated after the specified timestamp.
+func (t *redisTimeline) GetUpdatedKeys(ctx context.Context, after time.Time) ([]string, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	afterMicros := normalizeTimestamp(after)
+	redisCli := t.cli.getRedisCli()
+	globalTSKey := formatTimelineGlobalTS(t.name)
+
+	// Query the global timestamp index for all keys with timestamps > after
+	// Using exclusive range: (afterMicros means strictly greater than afterMicros
+	keys, err := redisCli.ZRangeArgs(ctx, redis.ZRangeArgs{
+		Key:     globalTSKey,
+		Start:   fmt.Sprintf("(%d", afterMicros),
+		Stop:    "+inf",
+		ByScore: true,
+	}).Result()
+
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("failed to query updated keys: %w", err)
+	}
+
+	return keys, nil
 }
 
 // Helper function to parse int64 from string

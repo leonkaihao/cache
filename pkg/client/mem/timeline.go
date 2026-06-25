@@ -635,6 +635,37 @@ func (t *memTimeline) GetKeyRetention(key string) model.RetentionPolicy {
 	return t.retention
 }
 
+// GetUpdatedKeys returns all keys that have been updated after the specified timestamp.
+func (t *memTimeline) GetUpdatedKeys(ctx context.Context, after time.Time) ([]string, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	afterMicros := normalizeTimestamp(after)
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	var result []string
+	for key, td := range t.data {
+		if len(td.points) == 0 {
+			continue
+		}
+		// Get the last timestamp for this key (points are sorted chronologically)
+		lastTs := td.points[len(td.points)-1].ts
+		if lastTs > afterMicros {
+			result = append(result, key)
+		}
+	}
+
+	return result, nil
+}
+
 // enforceRetention removes old time points based on retention policy.
 // Must be called with write lock held.
 func (t *memTimeline) enforceRetention(key string, td *timelineData) {

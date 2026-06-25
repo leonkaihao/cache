@@ -71,3 +71,72 @@ func BenchmarkTimeline_SparseUpdates(b *testing.B) {
 		}, false)
 	}
 }
+
+// --- GetUpdatedKeys benchmarks ---
+
+func BenchmarkTimeline_GetUpdatedKeys_100Keys(b *testing.B) {
+	cli := NewClient().(*client)
+	tl := cli.Timeline("bench_timeline")
+	ctx := context.Background()
+
+	// Setup: Add 100 keys
+	now := time.Now()
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("key%d", i)
+		_ = tl.Append(ctx, key, now.Add(time.Duration(i)*time.Millisecond), map[string]string{
+			"field": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+
+	queryAfter := now.Add(50 * time.Millisecond)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = tl.GetUpdatedKeys(ctx, queryAfter)
+	}
+}
+
+func BenchmarkTimeline_GetUpdatedKeys_1KKeys(b *testing.B) {
+	cli := NewClient().(*client)
+	tl := cli.Timeline("bench_timeline")
+	ctx := context.Background()
+
+	// Setup: Add 1000 keys
+	now := time.Now()
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("key%d", i)
+		_ = tl.Append(ctx, key, now.Add(time.Duration(i)*time.Millisecond), map[string]string{
+			"field": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+
+	queryAfter := now.Add(500 * time.Millisecond)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = tl.GetUpdatedKeys(ctx, queryAfter)
+	}
+}
+
+func BenchmarkTimeline_GetUpdatedKeys_10KKeys(b *testing.B) {
+	cli := NewClient().(*client)
+	tl := cli.Timeline("bench_timeline")
+	ctx := context.Background()
+
+	// Setup: Add 10000 keys
+	now := time.Now()
+	for i := 0; i < 10000; i++ {
+		key := fmt.Sprintf("key%d", i)
+		_ = tl.Append(ctx, key, now.Add(time.Duration(i)*time.Millisecond), map[string]string{
+			"field": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+
+	queryAfter := now.Add(5000 * time.Millisecond)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = tl.GetUpdatedKeys(ctx, queryAfter)
+	}
+}
+

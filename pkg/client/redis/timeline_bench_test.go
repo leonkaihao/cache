@@ -193,3 +193,62 @@ func BenchmarkRedisTimeline_GetRange(b *testing.B) {
 		_, _ = tl.GetRange(ctx, keys, start, end)
 	}
 }
+
+// --- GetUpdatedKeys benchmarks ---
+
+func BenchmarkRedisTimeline_GetUpdatedKeys_vs_KeysGetLatest(b *testing.B) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("bench_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+	ctx := context.Background()
+
+	// Setup: Add 100 keys with updates at different times
+	now := time.Now()
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("key%d", i)
+		_ = tl.Append(ctx, key, now.Add(time.Duration(i)*time.Millisecond), map[string]string{
+			"field": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+
+	queryAfter := now.Add(50 * time.Millisecond)
+
+	b.Run("GetUpdatedKeys", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _ = tl.GetUpdatedKeys(ctx, queryAfter)
+		}
+	})
+
+	b.Run("Keys+GetLatest", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			keys, _ := tl.Keys(ctx)
+			// For each key, need to get latest timestamp to filter
+			// This is the inefficient approach GetUpdatedKeys avoids
+			for _, key := range keys {
+				_, _ = tl.GetLatest(ctx, []string{key})
+			}
+		}
+	})
+}
+
+func BenchmarkRedisTimeline_Append_WithGlobalIndex(b *testing.B) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("bench_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+	ctx := context.Background()
+
+	// Measure Append overhead with global index maintenance
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = tl.Append(ctx, "key1", time.Now(), map[string]string{
+			"field": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+}
+

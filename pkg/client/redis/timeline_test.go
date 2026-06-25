@@ -212,3 +212,208 @@ func TestRedisTimeline_BatchGetAt(t *testing.T) {
 	assert.Nil(t, results[1]) // k2 has no data at t1
 	assert.Nil(t, results[2])
 }
+
+// --- GetUpdatedKeys tests ---
+
+func TestRedisTimeline_GetUpdatedKeys_NoUpdatesAfterTimestamp(t *testing.T) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("test_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+
+	ctx := context.Background()
+	t1 := time.Now()
+	t2 := t1.Add(time.Second)
+
+	// Add some data at t1
+	require.NoError(t, tl.Append(ctx, "k1", t1, map[string]string{"f": "v"}, false))
+
+	// Query for updates after t2 (later than any data)
+	keys, err := tl.GetUpdatedKeys(ctx, t2)
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}
+
+func TestRedisTimeline_GetUpdatedKeys_SingleKeyUpdated(t *testing.T) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("test_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+
+	ctx := context.Background()
+	t1 := time.Now()
+	t2 := t1.Add(time.Second)
+
+	// Add data at t2
+	require.NoError(t, tl.Append(ctx, "k1", t2, map[string]string{"f": "v"}, false))
+
+	// Query for updates after t1
+	keys, err := tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k1"}, keys)
+}
+
+func TestRedisTimeline_GetUpdatedKeys_MultipleKeysUpdated(t *testing.T) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("test_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+
+	ctx := context.Background()
+	t1 := time.Now()
+	t2 := t1.Add(time.Second)
+
+	// Add multiple keys at t2
+	require.NoError(t, tl.Append(ctx, "k1", t2, map[string]string{"f": "v"}, false))
+	require.NoError(t, tl.Append(ctx, "k2", t2, map[string]string{"f": "v"}, false))
+	require.NoError(t, tl.Append(ctx, "k3", t2, map[string]string{"f": "v"}, false))
+
+	// Query for updates after t1
+	keys, err := tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k1", "k2", "k3"}, keys)
+}
+
+func TestRedisTimeline_GetUpdatedKeys_KeyUpdatedMultipleTimes(t *testing.T) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("test_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+
+	ctx := context.Background()
+	t1 := time.Now()
+	t2 := t1.Add(time.Second)
+	t3 := t2.Add(time.Second)
+
+	// Update same key multiple times
+	require.NoError(t, tl.Append(ctx, "k1", t2, map[string]string{"f": "v1"}, false))
+	require.NoError(t, tl.Append(ctx, "k1", t3, map[string]string{"f": "v2"}, false))
+
+	// Query for updates after t1 - should return k1 only once
+	keys, err := tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k1"}, keys)
+}
+
+func TestRedisTimeline_GetUpdatedKeys_ExactTimestampBoundary(t *testing.T) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("test_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+
+	ctx := context.Background()
+	t1 := time.Now()
+	t2 := t1.Add(time.Second)
+
+	// Add data at exactly t1
+	require.NoError(t, tl.Append(ctx, "k1", t1, map[string]string{"f": "v"}, false))
+
+	// Query for updates after t1 (exclusive) - should not include k1
+	keys, err := tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+
+	// Add data at t2
+	require.NoError(t, tl.Append(ctx, "k2", t2, map[string]string{"f": "v"}, false))
+
+	// Query again - should now include k2 but not k1
+	keys, err = tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k2"}, keys)
+}
+
+func TestRedisTimeline_GetUpdatedKeys_ContextCancellation(t *testing.T) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("test_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	t1 := time.Now()
+	_, err := tl.GetUpdatedKeys(ctx, t1)
+	assert.Error(t, err)
+	assert.Equal(t, context.Canceled, err)
+}
+
+func TestRedisTimeline_GetUpdatedKeys_EmptyTimeline(t *testing.T) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("test_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+
+	ctx := context.Background()
+	t1 := time.Now()
+
+	// Query on empty timeline
+	keys, err := tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}
+
+func TestRedisTimeline_GetUpdatedKeys_GlobalIndexCleanupAfterRemove(t *testing.T) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("test_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+
+	ctx := context.Background()
+	t1 := time.Now()
+	t2 := t1.Add(time.Second)
+
+	// Add data
+	require.NoError(t, tl.Append(ctx, "k1", t2, map[string]string{"f": "v"}, false))
+	require.NoError(t, tl.Append(ctx, "k2", t2, map[string]string{"f": "v"}, false))
+
+	// Verify both keys are in the index
+	keys, err := tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k1", "k2"}, keys)
+
+	// Remove k1
+	require.NoError(t, tl.Remove(ctx, []string{"k1"}))
+
+	// Verify k1 is removed from index
+	keys, err = tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k2"}, keys)
+}
+
+func TestRedisTimeline_GetUpdatedKeys_GlobalIndexCleanupAfterClear(t *testing.T) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("test_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+
+	ctx := context.Background()
+	t1 := time.Now()
+	t2 := t1.Add(time.Second)
+
+	// Add data
+	require.NoError(t, tl.Append(ctx, "k1", t2, map[string]string{"f": "v"}, false))
+	require.NoError(t, tl.Append(ctx, "k2", t2, map[string]string{"f": "v"}, false))
+
+	// Verify keys are in the index
+	keys, err := tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k1", "k2"}, keys)
+
+	// Clear timeline
+	require.NoError(t, tl.Clear(ctx))
+
+	// Verify index is cleared
+	keys, err = tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}
+

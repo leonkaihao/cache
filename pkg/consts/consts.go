@@ -9,4 +9,5 @@ const (
 	KEYS_PREFIX      = "K/"
 	TS_PREFIX        = "TS/"
 	RETENTION_PREFIX = "R/"
+	GLOBAL_TS_SUFFIX = "TSG/"
 )

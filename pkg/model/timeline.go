@@ -92,6 +92,13 @@ type CacheTimeline interface {
 	// Returns an empty LabelSet if the key has no labels or does not exist.
 	KeyLabels(ctx context.Context, key string) (LabelSet, error)
 
+	// GetUpdatedKeys returns all keys that have been updated after the specified timestamp.
+	// The timestamp boundary is exclusive: only keys with updates strictly after the timestamp are returned.
+	// Each key appears at most once in the result, even if it was updated multiple times.
+	// Result order is unordered and implementation-defined.
+	// Returns an empty slice if no keys were updated after the timestamp.
+	GetUpdatedKeys(ctx context.Context, after time.Time) ([]string, error)
+
 	// Remove removes the specified keys from the timeline.
 	Remove(ctx context.Context, keys []string) error
 

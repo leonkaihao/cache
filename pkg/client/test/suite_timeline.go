@@ -30,6 +30,8 @@ func (suite *TimelineTestSuite) RunAllTests(t *testing.T) {
 	t.Run("ManagementOperations", suite.TestManagementOperations)
 	t.Run("RetentionPolicy", suite.TestRetentionPolicy)
 	t.Run("ContextCancellation", suite.TestContextCancellation)
+	t.Run("GetUpdatedKeys", suite.TestGetUpdatedKeys)
+	t.Run("GetUpdatedKeysEquivalence", suite.TestGetUpdatedKeysEquivalence)
 }
 
 func (suite *TimelineTestSuite) TestAppendAndGetAt(t *testing.T) {
@@ -240,3 +242,65 @@ func (suite *TimelineTestSuite) TestContextCancellation(t *testing.T) {
 	err := tl.Append(ctx, "key1", time.Now(), map[string]string{"f": "v"}, false)
 	assert.Error(t, err)
 }
+
+func (suite *TimelineTestSuite) TestGetUpdatedKeys(t *testing.T) {
+	tl := suite.CreateTimeline("test_get_updated_keys")
+	defer suite.Cleanup()
+
+	ctx := context.Background()
+	t1 := time.Now()
+	t2 := t1.Add(time.Second)
+	t3 := t2.Add(time.Second)
+
+	// Add keys at different times
+	require.NoError(t, tl.Append(ctx, "k1", t1, map[string]string{"f": "v1"}, false))
+	require.NoError(t, tl.Append(ctx, "k2", t2, map[string]string{"f": "v2"}, false))
+	require.NoError(t, tl.Append(ctx, "k3", t3, map[string]string{"f": "v3"}, false))
+
+	// Query after t1 should return k2 and k3
+	keys, err := tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k2", "k3"}, keys)
+
+	// Query after t2 should return only k3
+	keys, err = tl.GetUpdatedKeys(ctx, t2)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k3"}, keys)
+
+	// Query after t3 should return empty
+	keys, err = tl.GetUpdatedKeys(ctx, t3)
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}
+
+func (suite *TimelineTestSuite) TestGetUpdatedKeysEquivalence(t *testing.T) {
+	// This test verifies that Redis and Memory implementations produce equivalent results
+	tl := suite.CreateTimeline("test_equivalence")
+	defer suite.Cleanup()
+
+	ctx := context.Background()
+	t1 := time.Now()
+	t2 := t1.Add(time.Second)
+	t3 := t2.Add(time.Second)
+
+	// Create identical timeline data in both backends
+	require.NoError(t, tl.Append(ctx, "k1", t1, map[string]string{"a": "1", "b": "2"}, false))
+	require.NoError(t, tl.Append(ctx, "k1", t2, map[string]string{"a": "updated"}, false))
+	require.NoError(t, tl.Append(ctx, "k2", t2, map[string]string{"c": "3"}, false))
+	require.NoError(t, tl.Append(ctx, "k3", t3, map[string]string{"d": "4"}, false))
+
+	// Query at various timestamps and verify results
+	keys, err := tl.GetUpdatedKeys(ctx, t1)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k1", "k2", "k3"}, keys)
+
+	keys, err = tl.GetUpdatedKeys(ctx, t2)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k1", "k3"}, keys)
+
+	// Verify deduplication: k1 was updated at both t1 and t2, but should appear only once
+	keys, err = tl.GetUpdatedKeys(ctx, time.Time{})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k1", "k2", "k3"}, keys)
+}
+
