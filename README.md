@@ -95,19 +95,21 @@ if err := timeline.Append(ctx, "device_A", time.Now().Add(5*time.Minute), map[st
 }
 
 // Query current state (merged from all updates)
-state, err := timeline.GetLatest(ctx, "device_A")
+states, err := timeline.GetLatest(ctx, []string{"device_A"})
 if err != nil {
     log.Fatal(err)
 }
+state := states[0]
 log.Printf("Current state: zones=%s, beacons=%s, battery=%s\n",
     state["zones"], state["beacons"], state["battery"])
 // Output: zones=Z1,Z3,Z5, beacons=B5, battery=85
 
 // Query historical state
-historicalState, err := timeline.GetAt(ctx, "device_A", time.Now().Add(-10*time.Minute))
+historicalStates, err := timeline.GetAt(ctx, []string{"device_A"}, time.Now().Add(-10*time.Minute))
 if err != nil {
     log.Fatal(err)
 }
+historicalState := historicalStates[0]
 
 // Insert out-of-order event
 lateEvent := time.Now().Add(-1 * time.Hour)
@@ -302,13 +304,13 @@ type CacheTimeline interface {
     Append(ctx context.Context, key string, ts time.Time, data map[string]string, force bool) error
     Insert(ctx context.Context, key string, ts time.Time, data map[string]string, force bool) error
     
-    // Query operations
-    GetAt(ctx context.Context, key string, ts time.Time) (map[string]string, error)
-    GetExact(ctx context.Context, key string, ts time.Time) (map[string]string, error)
-    GetRange(ctx context.Context, key string, start, end time.Time) ([]TimeValue, error)
-    GetLatest(ctx context.Context, key string) (map[string]string, error)
-    Timeline(ctx context.Context, key string) ([]TimeValue, error)
-    GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]TimeValue, error)
+    // Batch query operations (results parallel to keys, nil = no data, BatchError = partial failure)
+    GetAt(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error)
+    GetExact(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error)
+    GetRange(ctx context.Context, keys []string, start, end time.Time) ([][]*TimeValue, error)
+    GetLatest(ctx context.Context, keys []string) ([]map[string]string, error)
+    Timeline(ctx context.Context, key string) ([]*TimeValue, error)
+    GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]*TimeValue, error)
     
     // Retention management
     SetRetention(policy RetentionPolicy) error
@@ -316,8 +318,14 @@ type CacheTimeline interface {
     GetRetention() RetentionPolicy
     GetKeyRetention(key string) RetentionPolicy
     
-    // Management
-    Keys(ctx context.Context) ([]string, error)
+    // Label management
+    AddKeyLabels(ctx context.Context, key string, labels []string) error
+    RemoveKeyLabels(ctx context.Context, key string, labels []string) error
+    KeyLabels(ctx context.Context, key string) (LabelSet, error)
+    
+    // Management (Keys supports label-based filtering: OR within array, AND between arrays)
+    Keys(ctx context.Context, labelFilters ...[]string) ([]string, error)
+    GetUpdatedKeys(ctx context.Context, after time.Time) ([]string, error)
     Remove(ctx context.Context, keys []string) error
     Clear(ctx context.Context) error
     Delete(ctx context.Context) error
@@ -446,6 +454,215 @@ if members != nil {
 // Remove members
 if err := clt.Remove(ctx, "admins", []string{"user2"}); err != nil {
     log.Fatal(err)
+}
+```
+
+### Timeline Batch Queries and Labels
+
+Timeline supports batch queries (multiple keys in one call) and label-based filtering for efficient time-series operations.
+
+#### Batch Queries
+
+Query multiple keys at once for better performance:
+
+```go
+ctx := context.Background()
+timeline := cli.Timeline("device_states")
+
+// Query multiple devices at once
+states, err := timeline.GetLatest(ctx, []string{"device_A", "device_B", "device_C"})
+if err != nil {
+    log.Fatal(err)
+}
+
+// Results are parallel to input keys
+// nil at position i means key i has no data (not an error)
+for i, key := range []string{"device_A", "device_B", "device_C"} {
+    if states[i] == nil {
+        log.Printf("%s: no data", key)
+    } else {
+        log.Printf("%s: battery=%s zones=%s", key, states[i]["battery"], states[i]["zones"])
+    }
+}
+
+// Batch historical queries
+ts := time.Now().Add(-1 * time.Hour)
+historicalStates, err := timeline.GetAt(ctx, []string{"device_A", "device_B"}, ts)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Batch range queries return [][]*TimeValue
+// Outer nil = key has no data in range
+// Inner slice elements are always non-nil pointers
+start := time.Now().Add(-24 * time.Hour)
+end := time.Now()
+ranges, err := timeline.GetRange(ctx, []string{"device_A", "device_B"}, start, end)
+if err != nil {
+    log.Fatal(err)
+}
+for i, key := range []string{"device_A", "device_B"} {
+    if ranges[i] == nil {
+        log.Printf("%s: no data in range", key)
+    } else {
+        log.Printf("%s: %d time points in range", key, len(ranges[i]))
+        for _, tv := range ranges[i] {
+            log.Printf("  %v: battery=%s", tv.Time, tv.Value["battery"])
+        }
+    }
+}
+```
+
+#### Label-Based Key Filtering
+
+Organize timeline keys with labels for semantic grouping and filtering:
+
+```go
+ctx := context.Background()
+timeline := cli.Timeline("device_states")
+
+// Add labels to categorize devices
+if err := timeline.AddKeyLabels(ctx, "device_A", []string{"sensor", "outdoor", "region-west"}); err != nil {
+    log.Fatal(err)
+}
+if err := timeline.AddKeyLabels(ctx, "device_B", []string{"sensor", "indoor", "region-west"}); err != nil {
+    log.Fatal(err)
+}
+if err := timeline.AddKeyLabels(ctx, "device_C", []string{"actuator", "outdoor", "region-east"}); err != nil {
+    log.Fatal(err)
+}
+
+// Query labels for a key
+labels, err := timeline.KeyLabels(ctx, "device_A")
+if err != nil {
+    log.Fatal(err)
+}
+hasSensor := labels.CheckAnd([]string{"sensor", "outdoor"}) // true
+hasIndoor := labels.CheckOr([]string{"indoor", "outdoor"})  // true
+
+// Filter keys by labels (OR within array, AND between arrays)
+// All keys with no filter
+allKeys, err := timeline.Keys(ctx)
+
+// Keys with "outdoor" label
+outdoorKeys, err := timeline.Keys(ctx, []string{"outdoor"})
+// Returns: ["device_A", "device_C"]
+
+// Keys with "sensor" OR "actuator" label
+deviceKeys, err := timeline.Keys(ctx, []string{"sensor", "actuator"})
+// Returns: ["device_A", "device_B", "device_C"]
+
+// Keys matching (outdoor OR indoor) AND region-west AND sensor
+westSensors, err := timeline.Keys(ctx, 
+    []string{"outdoor", "indoor"},  // OR: any of these
+    []string{"region-west"},         // AND this
+    []string{"sensor"},              // AND this
+)
+// Returns: ["device_A", "device_B"]
+
+// Combine label filtering with batch queries
+states, err := timeline.GetLatest(ctx, westSensors)
+if err != nil {
+    log.Fatal(err)
+}
+for i, key := range westSensors {
+    if states[i] != nil {
+        log.Printf("%s: %v", key, states[i])
+    }
+}
+
+// Remove labels
+if err := timeline.RemoveKeyLabels(ctx, "device_A", []string{"outdoor"}); err != nil {
+    log.Fatal(err)
+}
+```
+
+#### Partial Failure Handling with BatchError
+
+Batch operations return `*BatchError` for partial failures, allowing you to use successful results even when some keys fail:
+
+```go
+import "errors"
+
+ctx := context.Background()
+timeline := cli.Timeline("device_states")
+
+deviceIDs := []string{"device_A", "device_B", "device_C", "device_D"}
+states, err := timeline.GetLatest(ctx, deviceIDs)
+
+if err != nil {
+    var batchErr *model.BatchError
+    if errors.As(err, &batchErr) {
+        // Partial failure - some devices succeeded
+        log.Printf("Retrieved %d/%d devices successfully", 
+            batchErr.Total-batchErr.Failed, batchErr.Total)
+        
+        // Process successful results (nil = no data, which is not an error)
+        for i, state := range states {
+            if state != nil {
+                log.Printf("%s: %v", deviceIDs[i], state)
+            } else if _, failed := batchErr.KeyErrors[deviceIDs[i]]; !failed {
+                log.Printf("%s: no data available", deviceIDs[i])
+            }
+        }
+        
+        // Handle failed devices
+        for key, keyErr := range batchErr.KeyErrors {
+            log.Printf("Device %s failed: %v", key, keyErr)
+        }
+    } else {
+        // Total failure - no results available
+        log.Fatalf("Timeline query failed: %v", err)
+    }
+} else {
+    // Complete success - process all results
+    for i, state := range states {
+        if state != nil {
+            log.Printf("%s: %v", deviceIDs[i], state)
+        } else {
+            log.Printf("%s: no data", deviceIDs[i])
+        }
+    }
+}
+```
+
+#### Understanding Nil in Batch Results
+
+```go
+// GetLatest/GetAt/GetExact: []map[string]string
+states, err := timeline.GetLatest(ctx, []string{"key1", "key2"})
+// states[i] == nil → "key i has no data" (NOT an error, just no time points exist)
+// err != nil && errors.As(err, &BatchError{}) → partial failure (check KeyErrors for which keys failed)
+
+// GetRange: [][]*TimeValue
+ranges, err := timeline.GetRange(ctx, []string{"key1", "key2"}, start, end)
+// ranges[i] == nil → "key i has no time points in the range"
+// ranges[i][j] → Always non-nil if ranges[i] != nil (pointers avoid copying)
+```
+
+#### Query Keys by Update Time
+
+Find keys that were updated after a specific timestamp:
+
+```go
+ctx := context.Background()
+timeline := cli.Timeline("device_states")
+
+// Get all keys updated in the last hour
+lastHour := time.Now().Add(-1 * time.Hour)
+recentKeys, err := timeline.GetUpdatedKeys(ctx, lastHour)
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("Keys updated since %v: %v", lastHour, recentKeys)
+
+// Query only recently updated devices
+if len(recentKeys) > 0 {
+    states, err := timeline.GetLatest(ctx, recentKeys)
+    if err != nil {
+        log.Fatal(err)
+    }
+    // Process recent device states
 }
 ```
 
