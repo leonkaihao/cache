@@ -81,14 +81,9 @@ jobs:
 
     - name: Download dependencies
       run: go mod download
-
-    - name: Run benchmarks
-      run: make test/bench-integration
-      env:
-        REDIS_ADDR: localhost:6379
         
     - uses: bencherdev/bencher@main
-    - name: Track base branch benchmarks with Bencher
+    - name: Run memcache benchmarks with Bencher
       run: |
         bencher run \
         --project project-leonkaihao-cache \
@@ -101,9 +96,27 @@ jobs:
         --threshold-upper-boundary 0.99 \
         --thresholds-reset \
         --error-on-alert \
-        --adapter json \
+        --adapter go_bench \
         --github-actions '${{ secrets.GITHUB_TOKEN }}' \
-        bencher mock
+        "make test/bench"
+    - name: Run redis cache benchmarks with Bencher
+      run: |
+        bencher run \
+        --project project-leonkaihao-cache \
+        --key '${{ secrets.BENCHER_API_KEY }}' \
+        --branch main \
+        --testbed ubuntu-latest \
+        --threshold-measure latency \
+        --threshold-test t_test \
+        --threshold-max-sample-size 64 \
+        --threshold-upper-boundary 0.99 \
+        --thresholds-reset \
+        --error-on-alert \
+        --adapter go_bench \
+        --github-actions '${{ secrets.GITHUB_TOKEN }}' \
+        "make test/bench-integration"
+      env:
+        REDIS_ADDR: localhost:6379
 
   lint:
     name: Lint
