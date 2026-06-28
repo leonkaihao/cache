@@ -13,11 +13,10 @@ import (
 
 // redisTimeline implements the CacheTimeline interface using Redis backend.
 type redisTimeline struct {
-	name          string
-	cli           *client
-	retention     model.RetentionPolicy
-	keyRetentions map[string]model.RetentionPolicy
-	mu            sync.RWMutex
+	name      string
+	cli       *client
+	retention model.RetentionPolicy
+	mu        sync.RWMutex
 }
 
 // Key generation helpers following the pattern: T@{name}/K/, T@{name}/K/{key}/TS/, T@{name}/K/{key}/{ts}
@@ -32,14 +31,6 @@ func formatTimelineTS(name, key string) string {
 
 func formatTimelineData(name, key string, tsMicros int64) string {
 	return fmt.Sprintf("%s%s/%s%s/%d", consts.TIMELINE_PREFIX, name, consts.KEYS_PREFIX, key, tsMicros)
-}
-
-func formatTimelineRetention(name string) string {
-	return fmt.Sprintf("%s%s/%s", consts.TIMELINE_PREFIX, name, consts.RETENTION_PREFIX)
-}
-
-func formatTimelineKeyRetention(name, key string) string {
-	return fmt.Sprintf("%s%s/%s%s", consts.TIMELINE_PREFIX, name, consts.RETENTION_PREFIX, key)
 }
 
 // Label key helpers: T@{name}/L/, T@{name}/L/{label}, T@{name}/K/{key}/L
@@ -948,12 +939,6 @@ func (t *redisTimeline) Clear(ctx context.Context) error {
 		_ = redisCli.Del(ctx, labelsKey)
 	}
 
-	// Clear retention policies.
-	retentionKey := formatTimelineRetention(t.name)
-	if err := redisCli.Del(ctx, retentionKey).Err(); err != nil {
-		return fmt.Errorf("failed to delete retention: %w", err)
-	}
-
 	// Clear global timestamp index.
 	globalTSKey := formatTimelineGlobalTS(t.name)
 	if err := redisCli.Del(ctx, globalTSKey).Err(); err != nil {
@@ -971,163 +956,21 @@ func (t *redisTimeline) Delete(ctx context.Context) error {
 	return t.cli.RemoveTimeline(t.name)
 }
 
-// SetRetention sets the retention policy for the timeline.
-func (t *redisTimeline) SetRetention(policy model.RetentionPolicy) error {
-	if policy.MaxCount < 0 {
-		policy.MaxCount = 0
-	}
-	if policy.MaxDuration < 0 {
-		policy.MaxDuration = 0
-	}
-	if policy.Strategy != model.RetentionMax && policy.Strategy != model.RetentionMin {
-		return fmt.Errorf("invalid retention strategy: %d", policy.Strategy)
-	}
-
+// WithRetention sets the retention policy for the timeline and returns self for method chaining.
+// The policy applies to all keys in the timeline and is stored in-memory only.
+func (t *redisTimeline) WithRetention(policy model.RetentionPolicy) model.CacheTimeline {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
-	redisCli := t.cli.getRedisCli()
-	retentionKey := formatTimelineRetention(t.name)
-
-	ctx := context.Background()
-	_, err := redisCli.HSet(ctx, retentionKey,
-		"max_count", fmt.Sprintf("%d", policy.MaxCount),
-		"max_duration", fmt.Sprintf("%d", policy.MaxDuration.Microseconds()),
-		"strategy", fmt.Sprintf("%d", policy.Strategy),
-	).Result()
-	if err != nil {
-		return fmt.Errorf("failed to set retention: %w", err)
-	}
-
 	t.retention = policy
-	return nil
+	return t
 }
 
-// GetRetention returns the timeline's default retention policy.
+// GetRetention returns the timeline's retention policy.
+// Returns zero values if no policy has been set (meaning unlimited retention).
 func (t *redisTimeline) GetRetention() model.RetentionPolicy {
-	// Lock-upgrade pattern: read cache with RLock, fetch from Redis without lock,
-	// then upgrade to write Lock only if caching new data. This prevents write-under-read-lock
-	// race with SetRetention() while maintaining read concurrency.
-	
-	// Read cached value under RLock
 	t.mu.RLock()
-	cached := t.retention
-	t.mu.RUnlock()
-
-	// Fetch data from Redis without holding lock
-	redisCli := t.cli.getRedisCli()
-	retentionKey := formatTimelineRetention(t.name)
-
-	ctx := context.Background()
-	data, err := redisCli.HGetAll(ctx, retentionKey).Result()
-
-	// If no fresh data, return cached value
-	if err != nil || len(data) == 0 {
-		return cached
-	}
-
-	// Fresh data exists - parse and cache it under write lock
-	policy := model.RetentionPolicy{}
-	if maxCount, ok := data["max_count"]; ok {
-		policy.MaxCount = int(mustParseInt64(maxCount))
-	}
-	if maxDuration, ok := data["max_duration"]; ok {
-		policy.MaxDuration = time.Duration(mustParseInt64(maxDuration)) * time.Microsecond
-	}
-	if strategy, ok := data["strategy"]; ok {
-		policy.Strategy = model.RetentionStrategy(mustParseInt64(strategy))
-	}
-
-	// Acquire write lock to update cache
-	t.mu.Lock()
-	t.retention = policy
-	result := t.retention
-	t.mu.Unlock()
-
-	return result
-}
-
-// SetKeyRetention sets the retention policy for a specific key.
-func (t *redisTimeline) SetKeyRetention(key string, policy model.RetentionPolicy) error {
-	if key == "" {
-		return fmt.Errorf("key cannot be empty")
-	}
-	if policy.MaxCount < 0 {
-		policy.MaxCount = 0
-	}
-	if policy.MaxDuration < 0 {
-		policy.MaxDuration = 0
-	}
-	if policy.Strategy != model.RetentionMax && policy.Strategy != model.RetentionMin {
-		return fmt.Errorf("invalid retention strategy: %d", policy.Strategy)
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	redisCli := t.cli.getRedisCli()
-	retentionKey := formatTimelineKeyRetention(t.name, key)
-
-	ctx := context.Background()
-	_, err := redisCli.HSet(ctx, retentionKey,
-		"max_count", fmt.Sprintf("%d", policy.MaxCount),
-		"max_duration", fmt.Sprintf("%d", policy.MaxDuration.Microseconds()),
-		"strategy", fmt.Sprintf("%d", policy.Strategy),
-	).Result()
-	if err != nil {
-		return fmt.Errorf("failed to set key retention: %w", err)
-	}
-
-	t.keyRetentions[key] = policy
-	return nil
-}
-
-// GetKeyRetention returns the retention policy for a specific key.
-func (t *redisTimeline) GetKeyRetention(key string) model.RetentionPolicy {
-	// Lock-upgrade pattern: read cache with RLock, fetch from Redis without lock,
-	// then upgrade to write Lock only if caching new data. This prevents write-under-read-lock
-	// race with SetKeyRetention(). Note: all map operations (reads and writes) must be
-	// under lock since Go maps are not safe for concurrent read+write.
-	
-	// Try cached value first under RLock
-	t.mu.RLock()
-	if cached, exists := t.keyRetentions[key]; exists {
-		t.mu.RUnlock()
-		return cached
-	}
-	fallback := t.retention
-	t.mu.RUnlock()
-
-	// Fetch data from Redis without holding lock
-	redisCli := t.cli.getRedisCli()
-	retentionKey := formatTimelineKeyRetention(t.name, key)
-
-	ctx := context.Background()
-	data, err := redisCli.HGetAll(ctx, retentionKey).Result()
-
-	// If no fresh data, return fallback
-	if err != nil || len(data) == 0 {
-		return fallback
-	}
-
-	// Fresh data exists - parse it
-	policy := model.RetentionPolicy{}
-	if maxCount, ok := data["max_count"]; ok {
-		policy.MaxCount = int(mustParseInt64(maxCount))
-	}
-	if maxDuration, ok := data["max_duration"]; ok {
-		policy.MaxDuration = time.Duration(mustParseInt64(maxDuration)) * time.Microsecond
-	}
-	if strategy, ok := data["strategy"]; ok {
-		policy.Strategy = model.RetentionStrategy(mustParseInt64(strategy))
-	}
-
-	// Acquire write lock to update cache
-	t.mu.Lock()
-	t.keyRetentions[key] = policy
-	t.mu.Unlock()
-
-	return policy
+	defer t.mu.RUnlock()
+	return t.retention
 }
 
 // GetUpdatedKeys returns all keys that have been updated after the specified timestamp.
@@ -1156,21 +999,6 @@ func (t *redisTimeline) GetUpdatedKeys(ctx context.Context, after time.Time) ([]
 	}
 
 	return keys, nil
-}
-
-// getRetentionForKey returns the retention policy for a key (timeline default or key-specific override).
-// Uses memory cache for zero Redis overhead.
-func (t *redisTimeline) getRetentionForKey(key string) model.RetentionPolicy {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	// Check for key-specific policy
-	if policy, exists := t.keyRetentions[key]; exists {
-		return policy
-	}
-
-	// Return timeline default
-	return t.retention
 }
 
 // calculateRemovalBoundary calculates how many time points to remove from the beginning
@@ -1236,8 +1064,10 @@ func (t *redisTimeline) calculateRemovalBoundary(timestamps []redis.Z, policy mo
 // enforceRetention removes old time points from Redis to satisfy the retention policy.
 // This method is called after every Append/Insert operation (best-effort semantics).
 func (t *redisTimeline) enforceRetention(ctx context.Context, key string) error {
-	// Step 1: Get retention policy from memory cache (zero Redis overhead)
-	policy := t.getRetentionForKey(key)
+	// Step 1: Get retention policy from memory
+	t.mu.RLock()
+	policy := t.retention
+	t.mu.RUnlock()
 
 	// Fast path: no retention configured
 	if policy.MaxCount == 0 && policy.MaxDuration == 0 {

@@ -11,10 +11,9 @@ import (
 
 // memTimeline implements the CacheTimeline interface using in-memory storage.
 type memTimeline struct {
-	name          string
-	data          map[string]*timelineData
-	retention     model.RetentionPolicy
-	keyRetentions map[string]model.RetentionPolicy
+	name      string
+	data      map[string]*timelineData
+	retention model.RetentionPolicy
 	// keyLabels maps each logical key to its set of labels (forward index).
 	keyLabels map[string]map[string]bool
 	// labelIndex maps each label to the set of logical keys with that label (inverted index).
@@ -552,7 +551,6 @@ func (t *memTimeline) Clear(ctx context.Context) error {
 	}
 
 	t.data = make(map[string]*timelineData)
-	t.keyRetentions = make(map[string]model.RetentionPolicy)
 	t.keyLabels = make(map[string]map[string]bool)
 	t.labelIndex = make(map[string]map[string]bool)
 
@@ -572,66 +570,20 @@ func (t *memTimeline) Delete(ctx context.Context) error {
 	return nil
 }
 
-// SetRetention sets the retention policy for the timeline.
-func (t *memTimeline) SetRetention(policy model.RetentionPolicy) error {
-	if policy.MaxCount < 0 {
-		policy.MaxCount = 0
-	}
-	if policy.MaxDuration < 0 {
-		policy.MaxDuration = 0
-	}
-
-	if policy.Strategy != model.RetentionMax && policy.Strategy != model.RetentionMin {
-		return fmt.Errorf("invalid retention strategy: %d", policy.Strategy)
-	}
-
+// WithRetention sets the retention policy for the timeline and returns self for method chaining.
+// The policy applies to all keys in the timeline and is stored in-memory only.
+func (t *memTimeline) WithRetention(policy model.RetentionPolicy) model.CacheTimeline {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
 	t.retention = policy
-	return nil
+	return t
 }
 
-// GetRetention returns the timeline's default retention policy.
+// GetRetention returns the timeline's retention policy.
+// Returns zero values if no policy has been set (meaning unlimited retention).
 func (t *memTimeline) GetRetention() model.RetentionPolicy {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-
-	return t.retention
-}
-
-// SetKeyRetention sets the retention policy for a specific key.
-func (t *memTimeline) SetKeyRetention(key string, policy model.RetentionPolicy) error {
-	if key == "" {
-		return fmt.Errorf("key cannot be empty")
-	}
-
-	if policy.MaxCount < 0 {
-		policy.MaxCount = 0
-	}
-	if policy.MaxDuration < 0 {
-		policy.MaxDuration = 0
-	}
-
-	if policy.Strategy != model.RetentionMax && policy.Strategy != model.RetentionMin {
-		return fmt.Errorf("invalid retention strategy: %d", policy.Strategy)
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.keyRetentions[key] = policy
-	return nil
-}
-
-// GetKeyRetention returns the retention policy for a specific key.
-func (t *memTimeline) GetKeyRetention(key string) model.RetentionPolicy {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	if policy, ok := t.keyRetentions[key]; ok {
-		return policy
-	}
 	return t.retention
 }
 
@@ -669,10 +621,7 @@ func (t *memTimeline) GetUpdatedKeys(ctx context.Context, after time.Time) ([]st
 // enforceRetention removes old time points based on retention policy.
 // Must be called with write lock held.
 func (t *memTimeline) enforceRetention(key string, td *timelineData) {
-	policy, ok := t.keyRetentions[key]
-	if !ok {
-		policy = t.retention
-	}
+	policy := t.retention
 
 	if policy.MaxCount == 0 && policy.MaxDuration == 0 {
 		return

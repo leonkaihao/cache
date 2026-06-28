@@ -282,7 +282,7 @@ func BenchmarkRedisTimeline_AppendWithRetention_NoCleanup(b *testing.B) {
 	ctx := context.Background()
 
 	// Set retention but within limits (no cleanup needed)
-	_ = tl.SetRetention(model.RetentionPolicy{
+	tl.WithRetention(model.RetentionPolicy{
 		MaxCount:    1000,
 		MaxDuration: 1 * time.Hour,
 		Strategy:    model.RetentionMax,
@@ -305,7 +305,7 @@ func BenchmarkRedisTimeline_AppendWithRetention_WithCleanup(b *testing.B) {
 	ctx := context.Background()
 
 	// Set strict retention that triggers cleanup on every write
-	_ = tl.SetRetention(model.RetentionPolicy{
+	tl.WithRetention(model.RetentionPolicy{
 		MaxCount:    10,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
@@ -337,7 +337,7 @@ func BenchmarkRedisTimeline_RetentionCleanup_SmallDataset(b *testing.B) {
 	ctx := context.Background()
 
 	// Setup: 10 points with MaxCount=5
-	_ = tl.SetRetention(model.RetentionPolicy{
+	tl.WithRetention(model.RetentionPolicy{
 		MaxCount:    5,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
@@ -371,7 +371,7 @@ func BenchmarkRedisTimeline_RetentionCleanup_LargeDataset(b *testing.B) {
 	ctx := context.Background()
 
 	// Setup: 1000 points with MaxCount=100
-	_ = tl.SetRetention(model.RetentionPolicy{
+	tl.WithRetention(model.RetentionPolicy{
 		MaxCount:    100,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
@@ -403,7 +403,7 @@ func BenchmarkRedisTimeline_RetentionStrategies(b *testing.B) {
 		}()
 		ctx := context.Background()
 
-		_ = tl.SetRetention(model.RetentionPolicy{
+		tl.WithRetention(model.RetentionPolicy{
 			MaxCount:    10,
 			MaxDuration: 100 * time.Millisecond,
 			Strategy:    model.RetentionMax,
@@ -432,7 +432,7 @@ func BenchmarkRedisTimeline_RetentionStrategies(b *testing.B) {
 		}()
 		ctx := context.Background()
 
-		_ = tl.SetRetention(model.RetentionPolicy{
+		tl.WithRetention(model.RetentionPolicy{
 			MaxCount:    10,
 			MaxDuration: 100 * time.Millisecond,
 			Strategy:    model.RetentionMin,

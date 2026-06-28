@@ -216,7 +216,7 @@ func (suite *TimelineTestSuite) TestRetentionPolicy(t *testing.T) {
 
 	ctx := context.Background()
 
-	_ = tl.SetRetention(model.RetentionPolicy{
+	tl.WithRetention(model.RetentionPolicy{
 		MaxCount:    2,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,

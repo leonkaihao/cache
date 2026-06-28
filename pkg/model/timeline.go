@@ -58,20 +58,14 @@ type CacheTimeline interface {
 	// Each element is a non-nil *TimeValue pointer.
 	GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]*TimeValue, error)
 
-	// SetRetention sets the retention policy for the timeline.
-	// Policy applies to all keys unless overridden with SetKeyRetention.
-	SetRetention(policy RetentionPolicy) error
+	// WithRetention sets the retention policy for the timeline and returns self for method chaining.
+	// The policy applies to all keys in the timeline.
+	// Retention policy is stored in-memory only and must be set after timeline creation.
+	WithRetention(policy RetentionPolicy) CacheTimeline
 
-	// SetKeyRetention sets the retention policy for a specific key.
-	// Overrides the timeline's default retention policy.
-	SetKeyRetention(key string, policy RetentionPolicy) error
-
-	// GetRetention returns the timeline's default retention policy.
+	// GetRetention returns the timeline's retention policy.
+	// Returns zero values (MaxCount: 0, MaxDuration: 0) if no policy has been set, meaning unlimited retention.
 	GetRetention() RetentionPolicy
-
-	// GetKeyRetention returns the retention policy for a specific key.
-	// Returns timeline's default policy if no key-specific policy is set.
-	GetKeyRetention(key string) RetentionPolicy
 
 	// Keys returns all logical keys in the timeline.
 	// With no label filter arguments, all keys are returned.

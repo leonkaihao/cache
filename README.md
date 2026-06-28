@@ -19,7 +19,7 @@ A flexible and type-safe caching library for Go with support for both in-memory 
 - **Time-Based Updates**: Conditional updates based on timestamps
 - **Expiration Support**: Built-in TTL and expiration callbacks
 - **Collections**: Manage sets of members associated with keys
-- **Timeline**: Time-indexed state storage with sparse field updates and out-of-order insertion support
+- **Timeline**: Time-indexed state storage with sparse field updates, out-of-order insertion support, and config-driven retention policies
 - **Configurable Timeouts**: Per-client timeout configuration for Redis operations
 
 ## Installation
@@ -69,14 +69,12 @@ ctx := context.Background()
 // Create timeline
 timeline := cli.Timeline("device_states")
 
-// Set retention policy
-if err := timeline.SetRetention(model.RetentionPolicy{
+// Set retention policy (config-driven, in-memory)
+timeline.WithRetention(model.RetentionPolicy{
     MaxCount:    100,
     MaxDuration: 2 * time.Hour,
     Strategy:    model.RetentionMax,
-}); err != nil {
-    log.Fatal(err)
-}
+})
 
 // Record device state
 if err := timeline.Append(ctx, "device_A", time.Now(), map[string]string{
@@ -312,11 +310,9 @@ type CacheTimeline interface {
     Timeline(ctx context.Context, key string) ([]*TimeValue, error)
     GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]*TimeValue, error)
     
-    // Retention management
-    SetRetention(policy RetentionPolicy) error
-    SetKeyRetention(key string, policy RetentionPolicy) error
+    // Retention management (config-driven, in-memory)
+    WithRetention(policy RetentionPolicy) CacheTimeline
     GetRetention() RetentionPolicy
-    GetKeyRetention(key string) RetentionPolicy
     
     // Label management
     AddKeyLabels(ctx context.Context, key string, labels []string) error

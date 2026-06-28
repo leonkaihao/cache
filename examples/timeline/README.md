@@ -10,7 +10,7 @@ See `cmd/sample-mem/main.go` and `cmd/sample-redis/main.go` for complete example
 - Recording state updates with sparse field updates
 - Querying historical state
 - Handling out-of-order events
-- Managing retention policies
+- Managing retention policies (config-driven, in-memory)
 - Recomputation after historical insertions
 - Batch queries with multiple keys
 - Label-based key filtering
@@ -21,8 +21,8 @@ See `cmd/sample-mem/main.go` and `cmd/sample-redis/main.go` for complete example
 // Create timeline
 timeline := cli.Timeline("device_states")
 
-// Set retention policy
-timeline.SetRetention(model.RetentionPolicy{
+// Set retention policy (config-driven, in-memory)
+timeline.WithRetention(model.RetentionPolicy{
     MaxCount:    100,
     MaxDuration: 2 * time.Hour,
     Strategy:    model.RetentionMax,

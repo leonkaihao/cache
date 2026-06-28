@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	redis "github.com/redis/go-redis/v9"
 	"github.com/leonkaihao/cache/pkg/model"
+	redis "github.com/redis/go-redis/v9"
 )
 
 type ClientOption func(*client)
@@ -99,10 +99,9 @@ func (cli *client) Timeline(name string) model.CacheTimeline {
 	tl, ok := cli.timelines[name]
 	if !ok {
 		tl = &redisTimeline{
-			name:          name,
-			cli:           cli,
-			retention:     model.RetentionPolicy{Strategy: model.RetentionMax},
-			keyRetentions: make(map[string]model.RetentionPolicy),
+			name:      name,
+			cli:       cli,
+			retention: model.RetentionPolicy{Strategy: model.RetentionMax},
 		}
 		cli.timelines[name] = tl
 	}

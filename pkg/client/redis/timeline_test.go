@@ -87,18 +87,18 @@ func TestRedisTimeline_RetentionPolicy(t *testing.T) {
 	ctx := context.Background()
 
 	// Test MaxCount retention
-	err := tl.SetRetention(model.RetentionPolicy{
+	tl.WithRetention(model.RetentionPolicy{
 		MaxCount:    2,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
 	})
-	require.NoError(t, err)
 
 	// Write 3 points
 	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	t2 := t1.Add(1 * time.Hour)
 	t3 := t2.Add(1 * time.Hour)
 
+	var err error
 	err = tl.Append(ctx, "k1", t1, map[string]string{"v": "1"}, false)
 	require.NoError(t, err)
 	err = tl.Append(ctx, "k1", t2, map[string]string{"v": "2"}, false)
@@ -126,12 +126,11 @@ func TestRedisTimeline_RetentionDurationOnly(t *testing.T) {
 	ctx := context.Background()
 
 	// Test duration-only retention
-	err := tl.SetRetention(model.RetentionPolicy{
+	tl.WithRetention(model.RetentionPolicy{
 		MaxCount:    0,
 		MaxDuration: 2 * time.Hour,
 		Strategy:    model.RetentionMax,
 	})
-	require.NoError(t, err)
 
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	t1 := base
@@ -139,6 +138,7 @@ func TestRedisTimeline_RetentionDurationOnly(t *testing.T) {
 	t3 := base.Add(2 * time.Hour)
 	t4 := base.Add(3 * time.Hour) // This should trigger removal of t1
 
+	var err error
 	err = tl.Append(ctx, "k1", t1, map[string]string{"v": "1"}, false)
 	require.NoError(t, err)
 	err = tl.Append(ctx, "k1", t2, map[string]string{"v": "2"}, false)
@@ -169,14 +169,14 @@ func TestRedisTimeline_RetentionStrategies(t *testing.T) {
 		ctx := context.Background()
 
 		// RetentionMax: keep MORE data (union of constraints)
-		err := tl.SetRetention(model.RetentionPolicy{
+		tl.WithRetention(model.RetentionPolicy{
 			MaxCount:    3,
 			MaxDuration: 90 * time.Minute,
 			Strategy:    model.RetentionMax,
 		})
-		require.NoError(t, err)
 
 		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		var err error
 		for i := 0; i < 5; i++ {
 			ts := base.Add(time.Duration(i) * 30 * time.Minute)
 			err = tl.Append(ctx, "k1", ts, map[string]string{"v": fmt.Sprintf("%d", i)}, false)
@@ -200,14 +200,14 @@ func TestRedisTimeline_RetentionStrategies(t *testing.T) {
 		ctx := context.Background()
 
 		// RetentionMin: keep LESS data (intersection of constraints)
-		err := tl.SetRetention(model.RetentionPolicy{
+		tl.WithRetention(model.RetentionPolicy{
 			MaxCount:    3,
 			MaxDuration: 90 * time.Minute,
 			Strategy:    model.RetentionMin,
 		})
-		require.NoError(t, err)
 
 		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		var err error
 		for i := 0; i < 5; i++ {
 			ts := base.Add(time.Duration(i) * 30 * time.Minute)
 			err = tl.Append(ctx, "k1", ts, map[string]string{"v": fmt.Sprintf("%d", i)}, false)
@@ -223,57 +223,6 @@ func TestRedisTimeline_RetentionStrategies(t *testing.T) {
 	})
 }
 
-func TestRedisTimeline_RetentionPerKey(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_retention_per_key")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-
-	// Set timeline-level retention
-	err := tl.SetRetention(model.RetentionPolicy{
-		MaxCount:    5,
-		MaxDuration: 0,
-		Strategy:    model.RetentionMax,
-	})
-	require.NoError(t, err)
-
-	// Set key-specific retention (stricter)
-	err = tl.SetKeyRetention("k1", model.RetentionPolicy{
-		MaxCount:    2,
-		MaxDuration: 0,
-		Strategy:    model.RetentionMax,
-	})
-	require.NoError(t, err)
-
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	
-	// Write to k1 (should use key-specific retention)
-	for i := 0; i < 4; i++ {
-		ts := base.Add(time.Duration(i) * time.Hour)
-		err = tl.Append(ctx, "k1", ts, map[string]string{"v": fmt.Sprintf("%d", i)}, false)
-		require.NoError(t, err)
-	}
-
-	// Write to k2 (should use timeline-level retention)
-	for i := 0; i < 7; i++ {
-		ts := base.Add(time.Duration(i) * time.Hour)
-		err = tl.Append(ctx, "k2", ts, map[string]string{"v": fmt.Sprintf("%d", i)}, false)
-		require.NoError(t, err)
-	}
-
-	// Verify k1 has only 2 points
-	timeline1, err := tl.Timeline(ctx, "k1")
-	require.NoError(t, err)
-	assert.Equal(t, 2, len(timeline1), "k1 should use key-specific retention")
-
-	// Verify k2 has 5 points
-	timeline2, err := tl.Timeline(ctx, "k2")
-	require.NoError(t, err)
-	assert.Equal(t, 5, len(timeline2), "k2 should use timeline-level retention")
-}
 
 func TestRedisTimeline_RetentionBoundaryEdgeCases(t *testing.T) {
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
@@ -286,14 +235,14 @@ func TestRedisTimeline_RetentionBoundaryEdgeCases(t *testing.T) {
 
 		ctx := context.Background()
 
-		err := tl.SetRetention(model.RetentionPolicy{
+		tl.WithRetention(model.RetentionPolicy{
 			MaxCount:    3,
 			MaxDuration: 0,
 			Strategy:    model.RetentionMax,
 		})
-		require.NoError(t, err)
 
 		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		var err error
 		for i := 0; i < 3; i++ {
 			ts := base.Add(time.Duration(i) * time.Hour)
 			err = tl.Append(ctx, "k1", ts, map[string]string{"v": fmt.Sprintf("%d", i)}, false)
@@ -314,14 +263,14 @@ func TestRedisTimeline_RetentionBoundaryEdgeCases(t *testing.T) {
 
 		ctx := context.Background()
 
-		err := tl.SetRetention(model.RetentionPolicy{
+		tl.WithRetention(model.RetentionPolicy{
 			MaxCount:    1,
 			MaxDuration: 0,
 			Strategy:    model.RetentionMax,
 		})
-		require.NoError(t, err)
 
 		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		var err error
 		for i := 0; i < 3; i++ {
 			ts := base.Add(time.Duration(i) * time.Hour)
 			err = tl.Append(ctx, "k1", ts, map[string]string{"v": fmt.Sprintf("%d", i)}, false)
@@ -343,12 +292,11 @@ func TestRedisTimeline_RetentionBoundaryEdgeCases(t *testing.T) {
 
 		ctx := context.Background()
 
-		err := tl.SetRetention(model.RetentionPolicy{
+		tl.WithRetention(model.RetentionPolicy{
 			MaxCount:    2,
 			MaxDuration: 1 * time.Hour,
 			Strategy:    model.RetentionMax,
 		})
-		require.NoError(t, err)
 
 		// Query empty timeline - should not error
 		timeline, err := tl.Timeline(ctx, "k1")
@@ -367,12 +315,11 @@ func TestRedisTimeline_RetentionConcurrency(t *testing.T) {
 	ctx := context.Background()
 
 	// Set retention
-	err := tl.SetRetention(model.RetentionPolicy{
+	tl.WithRetention(model.RetentionPolicy{
 		MaxCount:    10,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
 	})
-	require.NoError(t, err)
 
 	// Concurrent writes to same key
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -403,12 +350,11 @@ func TestRedisTimeline_RetentionRedisCleanup(t *testing.T) {
 	ctx := context.Background()
 
 	// Set retention
-	err := tl.SetRetention(model.RetentionPolicy{
+	tl.WithRetention(model.RetentionPolicy{
 		MaxCount:    2,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
 	})
-	require.NoError(t, err)
 
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	t1 := base
@@ -416,6 +362,7 @@ func TestRedisTimeline_RetentionRedisCleanup(t *testing.T) {
 	t3 := base.Add(2 * time.Hour)
 
 	// Write 3 points
+	var err error
 	err = tl.Append(ctx, "k1", t1, map[string]string{"v": "1"}, false)
 	require.NoError(t, err)
 	err = tl.Append(ctx, "k1", t2, map[string]string{"v": "2"}, false)

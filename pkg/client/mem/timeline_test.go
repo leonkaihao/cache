@@ -148,12 +148,11 @@ func TestTimeline_RetentionPolicy(t *testing.T) {
 	ctx := context.Background()
 
 	// Set retention policy
-	err := tl.SetRetention(model.RetentionPolicy{
+	tl.WithRetention(model.RetentionPolicy{
 		MaxCount:    2,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
 	})
-	require.NoError(t, err)
 
 	// Add 3 points
 	t1 := time.Now()
