@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leonkaihao/cache/pkg/model"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 )
 
 func BenchmarkRedisTimeline_Append(b *testing.B) {
@@ -354,7 +354,7 @@ func BenchmarkRedisTimeline_RetentionCleanup_SmallDataset(b *testing.B) {
 			}, false)
 		}
 		b.StartTimer()
-		
+
 		// This write triggers cleanup of 5 points
 		_ = tl.Append(ctx, "key1", base.Add(11*time.Millisecond), map[string]string{
 			"field": "value11",
@@ -395,7 +395,7 @@ func BenchmarkRedisTimeline_RetentionCleanup_LargeDataset(b *testing.B) {
 
 func BenchmarkRedisTimeline_RetentionStrategies(b *testing.B) {
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	
+
 	b.Run("RetentionMax", func(b *testing.B) {
 		tl := cli.Timeline("bench_retention_max")
 		defer func() {
@@ -454,4 +454,3 @@ func BenchmarkRedisTimeline_RetentionStrategies(b *testing.B) {
 		}
 	})
 }
-

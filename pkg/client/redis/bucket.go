@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/leonkaihao/cache/v2/pkg/consts"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 	goredis "github.com/redis/go-redis/v9"
-	"github.com/leonkaihao/cache/pkg/consts"
-	"github.com/leonkaihao/cache/pkg/model"
 )
 
 type bucket[T any] struct {

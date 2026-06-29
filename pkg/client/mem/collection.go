@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/leonkaihao/cache/pkg/model"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 )
 
 type collection struct {

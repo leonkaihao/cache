@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leonkaihao/cache/pkg/model"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -159,7 +159,7 @@ func TestRedisTimeline_RetentionDurationOnly(t *testing.T) {
 
 func TestRedisTimeline_RetentionStrategies(t *testing.T) {
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	
+
 	t.Run("RetentionMax", func(t *testing.T) {
 		tl := cli.Timeline("test_retention_max")
 		defer func() {
@@ -223,10 +223,9 @@ func TestRedisTimeline_RetentionStrategies(t *testing.T) {
 	})
 }
 
-
 func TestRedisTimeline_RetentionBoundaryEdgeCases(t *testing.T) {
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	
+
 	t.Run("ExactCount", func(t *testing.T) {
 		tl := cli.Timeline("test_exact_count")
 		defer func() {
@@ -372,7 +371,7 @@ func TestRedisTimeline_RetentionRedisCleanup(t *testing.T) {
 
 	// Get Redis client to verify actual data deletion
 	redisCli := cli.getRedisCli()
-	
+
 	// Verify timestamp ZSET has only 2 entries
 	tsKey := fmt.Sprintf("T@test_retention_cleanup/K/k1/TS/")
 	tsCount, err := redisCli.ZCard(ctx, tsKey).Result()
@@ -391,11 +390,11 @@ func TestRedisTimeline_RetentionRedisCleanup(t *testing.T) {
 	t3Micros := t3.Truncate(time.Microsecond).UnixMicro()
 	newDataKey2 := fmt.Sprintf("T@test_retention_cleanup/K/k1/%d", t2Micros)
 	newDataKey3 := fmt.Sprintf("T@test_retention_cleanup/K/k1/%d", t3Micros)
-	
+
 	exists2, err := redisCli.Exists(ctx, newDataKey2).Result()
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), exists2, "newer data HASH should still exist")
-	
+
 	exists3, err := redisCli.Exists(ctx, newDataKey3).Result()
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), exists3, "newest data HASH should still exist")
@@ -744,5 +743,3 @@ func TestRedisTimeline_GetUpdatedKeys_GlobalIndexCleanupAfterClear(t *testing.T)
 	require.NoError(t, err)
 	assert.Empty(t, keys)
 }
-
-

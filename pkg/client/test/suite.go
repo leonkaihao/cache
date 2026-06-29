@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leonkaihao/cache/pkg/model"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

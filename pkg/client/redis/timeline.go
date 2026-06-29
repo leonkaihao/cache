@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/leonkaihao/cache/pkg/consts"
-	"github.com/leonkaihao/cache/pkg/model"
+	"github.com/leonkaihao/cache/v2/pkg/consts"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 	redis "github.com/redis/go-redis/v9"
 )
 

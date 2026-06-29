@@ -3,7 +3,7 @@ package coding
 import (
 	"encoding/json"
 
-	"github.com/leonkaihao/cache/pkg/model"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 )
 
 type jsonCoder struct {

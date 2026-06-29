@@ -5,9 +5,9 @@ import (
 	"log"
 	"time"
 
-	cache "github.com/leonkaihao/cache/pkg/client/redis"
-	cachecoding "github.com/leonkaihao/cache/pkg/coding"
-	"github.com/leonkaihao/cache/pkg/model"
+	cache "github.com/leonkaihao/cache/v2/pkg/client/redis"
+	cachecoding "github.com/leonkaihao/cache/v2/pkg/coding"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 )
 
 type Foo struct {
@@ -124,15 +124,15 @@ func bucketOperations(ctx context.Context, cli model.CacheClient) error {
 	_ = ls1.CheckOr([]string{"label3", "label4"})  // false
 
 	// Search with label
-	_, err = fooBkt1.Filter(ctx, []string{"label1"})           // doc1
+	_, err = fooBkt1.Filter(ctx, []string{"label1"}) // doc1
 	if err != nil {
 		return err
 	}
-	_, err = fooBkt1.Filter(ctx, []string{"label2"})           // doc1, doc3
+	_, err = fooBkt1.Filter(ctx, []string{"label2"}) // doc1, doc3
 	if err != nil {
 		return err
 	}
-	_, err = fooBkt1.Filter(ctx, []string{"label3"})           // doc3
+	_, err = fooBkt1.Filter(ctx, []string{"label3"}) // doc3
 	if err != nil {
 		return err
 	}
@@ -140,7 +140,7 @@ func bucketOperations(ctx context.Context, cli model.CacheClient) error {
 	if err != nil {
 		return err
 	}
-	keys1, err := fooBkt1.Filter(ctx, []string{})              // all: doc1, doc3
+	keys1, err := fooBkt1.Filter(ctx, []string{}) // all: doc1, doc3
 	if err != nil {
 		return err
 	}
@@ -239,7 +239,7 @@ func timelineOperations(ctx context.Context, cli model.CacheClient) error {
 
 	// Record device state at different timestamps
 	now := time.Now()
-	
+
 	// Initial state
 	if err := timeline.Append(ctx, "device_A", now, map[string]string{
 		"zones":   "Z1,Z3",
@@ -269,7 +269,7 @@ func timelineOperations(ctx context.Context, cli model.CacheClient) error {
 		return err
 	}
 	state := latestStates[0]
-	log.Printf("Latest state: zones=%s, beacons=%s, battery=%s\n", 
+	log.Printf("Latest state: zones=%s, beacons=%s, battery=%s\n",
 		state["zones"], state["beacons"], state["battery"])
 
 	// Query historical state

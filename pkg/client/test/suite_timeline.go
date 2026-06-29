@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leonkaihao/cache/pkg/model"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -181,7 +181,7 @@ func (suite *TimelineTestSuite) TestGetAffectedRange(t *testing.T) {
 
 	_ = tl.Append(ctx, "key1", base, map[string]string{"v": "1"}, false)
 	_ = tl.Append(ctx, "key1", base.Add(2*time.Second), map[string]string{"v": "3"}, false)
-	
+
 	// Insert in between
 	_ = tl.Insert(ctx, "key1", base.Add(time.Second), map[string]string{"v": "2"}, false)
 
@@ -229,10 +229,10 @@ func (suite *TimelineTestSuite) TestRetentionPolicy(t *testing.T) {
 
 	timeline, err := tl.Timeline(ctx, "key1")
 	require.NoError(t, err)
-	
+
 	// Strong assertion: exactly 2 points should remain
 	assert.Equal(t, 2, len(timeline), "retention should keep exactly 2 points")
-	
+
 	// Verify correct points remain (last 2)
 	if len(timeline) == 2 {
 		assert.Equal(t, "2", timeline[0].Value["v"], "first point should be '2'")
@@ -311,4 +311,3 @@ func (suite *TimelineTestSuite) TestGetUpdatedKeysEquivalence(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"k1", "k2", "k3"}, keys)
 }
-

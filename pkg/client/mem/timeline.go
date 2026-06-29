@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/leonkaihao/cache/pkg/model"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 )
 
 // memTimeline implements the CacheTimeline interface using in-memory storage.

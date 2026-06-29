@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/leonkaihao/cache/v2/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"github.com/leonkaihao/cache/pkg/model"
 )
 
 type testData struct {

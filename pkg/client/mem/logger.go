@@ -1,8 +1,8 @@
 package mem
 
 import (
-	"github.com/leonkaihao/cache/pkg/logger"
-	"github.com/leonkaihao/cache/pkg/model"
+	"github.com/leonkaihao/cache/v2/pkg/logger"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 )
 
 // Logger is the package-level logger for mem cache operations.

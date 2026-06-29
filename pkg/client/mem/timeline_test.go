@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leonkaihao/cache/pkg/model"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -101,7 +101,7 @@ func TestTimeline_TimestampNormalization(t *testing.T) {
 	tl := cli.Timeline("test_timeline")
 
 	ctx := context.Background()
-	
+
 	// Create time with nanosecond precision
 	ts := time.Date(2024, 6, 13, 10, 0, 0, 123456789, time.UTC)
 
@@ -625,4 +625,3 @@ func TestTimeline_GetUpdatedKeys_ConcurrentCalls(t *testing.T) {
 		<-done
 	}
 }
-

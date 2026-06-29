@@ -3,8 +3,8 @@ package mem
 import (
 	"testing"
 
-	"github.com/leonkaihao/cache/pkg/client/test"
-	"github.com/leonkaihao/cache/pkg/model"
+	"github.com/leonkaihao/cache/v2/pkg/client/test"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 )
 
 func TestMemorySuite(t *testing.T) {
