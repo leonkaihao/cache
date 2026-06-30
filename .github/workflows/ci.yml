@@ -83,7 +83,7 @@ jobs:
         cache: true
 
     - name: Download dependencies
-      run: ${{ matrix.go-version }} mod download
+      run: go mod download
         
     - uses: bencherdev/bencher@main
     - name: Run memcache benchmarks with Bencher
