@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.23', '1.26']
+        go-version: ['1.20', '1.26']
     
     services:
       redis:
@@ -56,6 +56,9 @@ jobs:
   benchmark:
     name: Continuous Benchmarking
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.20']
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     
     services:
@@ -76,11 +79,11 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
-        go-version: '1.23'
+        go-version: ${{ matrix.go-version }}
         cache: true
 
     - name: Download dependencies
-      run: go mod download
+      run: ${{ matrix.go-version }} mod download
         
     - uses: bencherdev/bencher@main
     - name: Run memcache benchmarks with Bencher
@@ -121,6 +124,9 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.20']
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
@@ -128,7 +134,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
-        go-version: '1.23'
+        go-version: ${{ matrix.go-version }}
         cache: true
 
     - name: Run golangci-lint
@@ -139,6 +145,9 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.20']
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
@@ -146,8 +155,8 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
-        go-version: '1.23'
+        go-version: ${{ matrix.go-version }}
         cache: true
 
     - name: Build
-      run: go build -v ./...
+      run: make build

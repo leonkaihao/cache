@@ -2,34 +2,36 @@ package logger
 
 import (
 	"fmt"
-	"log/slog"
 
 	"github.com/leonkaihao/cache/v2/pkg/model"
+	"go.uber.org/zap"
 )
 
-// DefaultLogger is the default implementation of Logger using slog.
-// It uses the default slog logger instance.
-type DefaultLogger struct{}
+// DefaultLogger is the default implementation of Logger using zap.
+type DefaultLogger struct {
+	sugar *zap.SugaredLogger
+}
 
 // NewDefaultLogger creates a new DefaultLogger instance
 func NewDefaultLogger() model.Logger {
-	return &DefaultLogger{}
+	logger, _ := zap.NewProduction()
+	return &DefaultLogger{sugar: logger.Sugar()}
 }
 
 func (l *DefaultLogger) Debug(msg string, keysAndValues ...any) {
-	slog.Debug(msg, keysAndValues...)
+	l.sugar.Debugw(msg, keysAndValues...)
 }
 
 func (l *DefaultLogger) Info(msg string, keysAndValues ...any) {
-	slog.Info(msg, keysAndValues...)
+	l.sugar.Infow(msg, keysAndValues...)
 }
 
 func (l *DefaultLogger) Error(msg string, keysAndValues ...any) {
-	slog.Error(msg, keysAndValues...)
+	l.sugar.Errorw(msg, keysAndValues...)
 }
 
 func (l *DefaultLogger) Fatal(msg string, keysAndValues ...any) {
-	slog.Error(msg, keysAndValues...)
+	l.sugar.Errorw(msg, keysAndValues...)
 	// Extract error for panic if available
 	var err error
 	for i := 0; i < len(keysAndValues)-1; i += 2 {
