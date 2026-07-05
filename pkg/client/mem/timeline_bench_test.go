@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/leonkaihao/cache/v2/pkg/logger"
 )
 
 func BenchmarkTimeline_Append(b *testing.B) {
+	SetLogger(logger.NewSilentLogger())
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline")
 	ctx := context.Background()
@@ -21,6 +24,7 @@ func BenchmarkTimeline_Append(b *testing.B) {
 }
 
 func BenchmarkTimeline_GetAt(b *testing.B) {
+	SetLogger(logger.NewSilentLogger())
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline")
 	ctx := context.Background()
@@ -40,6 +44,7 @@ func BenchmarkTimeline_GetAt(b *testing.B) {
 }
 
 func BenchmarkTimeline_GetRange(b *testing.B) {
+	SetLogger(logger.NewSilentLogger())
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline")
 	ctx := context.Background()
@@ -59,6 +64,7 @@ func BenchmarkTimeline_GetRange(b *testing.B) {
 }
 
 func BenchmarkTimeline_SparseUpdates(b *testing.B) {
+	SetLogger(logger.NewSilentLogger())
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline")
 	ctx := context.Background()
@@ -75,6 +81,7 @@ func BenchmarkTimeline_SparseUpdates(b *testing.B) {
 // --- GetUpdatedKeys benchmarks ---
 
 func BenchmarkTimeline_GetUpdatedKeys_100Keys(b *testing.B) {
+	SetLogger(logger.NewSilentLogger())
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline")
 	ctx := context.Background()
@@ -97,6 +104,7 @@ func BenchmarkTimeline_GetUpdatedKeys_100Keys(b *testing.B) {
 }
 
 func BenchmarkTimeline_GetUpdatedKeys_1KKeys(b *testing.B) {
+	SetLogger(logger.NewSilentLogger())
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline")
 	ctx := context.Background()
@@ -119,6 +127,7 @@ func BenchmarkTimeline_GetUpdatedKeys_1KKeys(b *testing.B) {
 }
 
 func BenchmarkTimeline_GetUpdatedKeys_10KKeys(b *testing.B) {
+	SetLogger(logger.NewSilentLogger())
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline")
 	ctx := context.Background()
@@ -139,4 +148,3 @@ func BenchmarkTimeline_GetUpdatedKeys_10KKeys(b *testing.B) {
 		_, _ = tl.GetUpdatedKeys(ctx, queryAfter)
 	}
 }
-

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/leonkaihao/cache/v2/pkg/logger"
 	"github.com/leonkaihao/cache/v2/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -318,6 +319,7 @@ func TestContextCancellation(t *testing.T) {
 }
 
 func BenchmarkUpdateData1000(b *testing.B) {
+	SetLogger(logger.NewSilentLogger())
 	ctx := context.Background()
 	cli := NewClient()
 	bkt, _ := NewBucket[testInt](cli, "TST")
@@ -332,6 +334,7 @@ func BenchmarkUpdateData1000(b *testing.B) {
 }
 
 func BenchmarkUpdateDataWithTs1000(b *testing.B) {
+	SetLogger(logger.NewSilentLogger())
 	ctx := context.Background()
 	cli := NewClient()
 	bkt, _ := NewBucket[testInt](cli, "TST")
@@ -346,6 +349,7 @@ func BenchmarkUpdateDataWithTs1000(b *testing.B) {
 }
 
 func BenchmarkFilter1000Label1(b *testing.B) {
+	SetLogger(logger.NewSilentLogger())
 	ctx := context.Background()
 	cli := NewClient()
 	bkt, _ := NewBucket[testInt](cli, "TST")
@@ -364,6 +368,7 @@ func BenchmarkFilter1000Label1(b *testing.B) {
 }
 
 func BenchmarkFilter1000Label8(b *testing.B) {
+	SetLogger(logger.NewSilentLogger())
 	ctx := context.Background()
 	cli := NewClient()
 	bkt, _ := NewBucket[testInt](cli, "TST")
