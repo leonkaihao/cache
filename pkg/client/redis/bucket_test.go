@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/leonkaihao/cache/v2/pkg/coding"
-	"github.com/leonkaihao/cache/v2/pkg/logger"
 	"github.com/leonkaihao/cache/v2/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -332,7 +331,6 @@ func TestRedisErrorHandling(t *testing.T) {
 }
 
 func BenchmarkUpdateData(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	ctx := context.Background()
 	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, _ := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
@@ -349,7 +347,6 @@ func BenchmarkUpdateData(b *testing.B) {
 }
 
 func BenchmarkUpdateDataWithTs(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	ctx := context.Background()
 	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, _ := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
@@ -365,7 +362,6 @@ func BenchmarkUpdateDataWithTs(b *testing.B) {
 }
 
 func BenchmarkFilter1000Label1(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	ctx := context.Background()
 	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, _ := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
@@ -387,7 +383,6 @@ func BenchmarkFilter1000Label1(b *testing.B) {
 }
 
 func BenchmarkFilter1000Label8(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	ctx := context.Background()
 	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, _ := NewBucket[testData](cli, "TST", coding.NewJsonCoder())
@@ -409,7 +404,6 @@ func BenchmarkFilter1000Label8(b *testing.B) {
 }
 
 func BenchmarkFetchValue(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	ctx := context.Background()
 	cli := NewClient(getRedisAddr(), "admin", 1)
 	bkt, _ := NewBucket[testData](cli, "TST", coding.NewJsonCoder())

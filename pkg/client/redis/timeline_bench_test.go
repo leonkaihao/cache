@@ -9,12 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leonkaihao/cache/v2/pkg/logger"
 	"github.com/leonkaihao/cache/v2/pkg/model"
 )
 
 func BenchmarkRedisTimeline_Append(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline")
 	defer func() {
@@ -31,7 +29,6 @@ func BenchmarkRedisTimeline_Append(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetAt(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline")
 	defer func() {
@@ -54,7 +51,6 @@ func BenchmarkRedisTimeline_GetAt(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetAt_MultiKey(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline")
 	defer func() {
@@ -84,7 +80,6 @@ func BenchmarkRedisTimeline_GetAt_MultiKey(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetExact(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline")
 	defer func() {
@@ -112,7 +107,6 @@ func BenchmarkRedisTimeline_GetExact(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetLatest(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline_latest")
 	defer func() {
@@ -142,7 +136,6 @@ func BenchmarkRedisTimeline_GetLatest(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetAffectedRange(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline_affected")
 	defer func() {
@@ -171,7 +164,6 @@ func BenchmarkRedisTimeline_GetAffectedRange(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_GetRange(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline_exact")
 	defer func() {
@@ -207,7 +199,6 @@ func BenchmarkRedisTimeline_GetRange(b *testing.B) {
 // --- GetUpdatedKeys benchmarks ---
 
 func BenchmarkRedisTimeline_GetUpdatedKeys_vs_KeysGetLatest(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline")
 	defer func() {
@@ -247,7 +238,6 @@ func BenchmarkRedisTimeline_GetUpdatedKeys_vs_KeysGetLatest(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_Append_WithGlobalIndex(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_timeline")
 	defer func() {
@@ -267,7 +257,6 @@ func BenchmarkRedisTimeline_Append_WithGlobalIndex(b *testing.B) {
 // --- Retention benchmarks ---
 
 func BenchmarkRedisTimeline_AppendNoRetention(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_no_retention")
 	defer func() {
@@ -285,7 +274,6 @@ func BenchmarkRedisTimeline_AppendNoRetention(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_AppendWithRetention_NoCleanup(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_retention_no_cleanup")
 	defer func() {
@@ -309,7 +297,6 @@ func BenchmarkRedisTimeline_AppendWithRetention_NoCleanup(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_AppendWithRetention_WithCleanup(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_retention_cleanup")
 	defer func() {
@@ -342,7 +329,6 @@ func BenchmarkRedisTimeline_AppendWithRetention_WithCleanup(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_RetentionCleanup_SmallDataset(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_retention_small")
 	defer func() {
@@ -377,7 +363,6 @@ func BenchmarkRedisTimeline_RetentionCleanup_SmallDataset(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_RetentionCleanup_LargeDataset(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 	tl := cli.Timeline("bench_retention_large")
 	defer func() {
@@ -409,7 +394,6 @@ func BenchmarkRedisTimeline_RetentionCleanup_LargeDataset(b *testing.B) {
 }
 
 func BenchmarkRedisTimeline_RetentionStrategies(b *testing.B) {
-	SetLogger(logger.NewSilentLogger())
 	cli := NewClient(getRedisAddr(), "", 0).(*client)
 
 	b.Run("RetentionMax", func(b *testing.B) {
