@@ -1,6 +1,6 @@
 # Cache
 
-[![CI](https://github.com/leonkaihao/cache/v2/actions/workflows/ci.yml/badge.svg)](https://github.com/leonkaihao/cache/v2/actions/workflows/ci.yml)
+[![CI](https://github.com/leonkaihao/cache/actions/workflows/ci.yml/badge.svg)](https://github.com/leonkaihao/cache/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/leonkaihao/cache/v2)](https://goreportcard.com/report/github.com/leonkaihao/cache/v2)
 [![codecov](https://codecov.io/gh/leonkaihao/cache/branch/master/graph/badge.svg)](https://codecov.io/gh/leonkaihao/cache)
 [![Bencher](https://img.shields.io/badge/Performance-Bencher-blue)](https://bencher.dev/perf/leonkaihao)
