@@ -406,6 +406,52 @@ func TestTimeline_BatchGetLatest(t *testing.T) {
 	assert.Nil(t, results[2])
 }
 
+// TestTimeline_GetLatest_CacheHitMiss tests the merged state cache behavior
+func TestTimeline_GetLatest_CacheHitMiss(t *testing.T) {
+	cli := NewClient().(*client)
+	tl := cli.Timeline("test_timeline").(*memTimeline)
+	ctx := context.Background()
+	t1 := time.Now().Truncate(time.Microsecond)
+
+	// Setup: Add some data
+	require.NoError(t, tl.Append(ctx, "k1", t1, map[string]string{"a": "1"}, false))
+	require.NoError(t, tl.Append(ctx, "k1", t1.Add(time.Second), map[string]string{"b": "2"}, false))
+
+	// First GetLatest call - cache miss, should populate cache
+	results1, err := tl.GetLatest(ctx, []string{"k1"})
+	require.NoError(t, err)
+	require.Len(t, results1, 1)
+	assert.Equal(t, map[string]string{"a": "1", "b": "2"}, results1[0])
+
+	// Verify cache was populated
+	td := tl.data["k1"]
+	assert.NotNil(t, td.merged)
+	assert.Equal(t, map[string]string{"a": "1", "b": "2"}, td.merged)
+
+	// Second GetLatest call - cache hit, should return cached value
+	results2, err := tl.GetLatest(ctx, []string{"k1"})
+	require.NoError(t, err)
+	require.Len(t, results2, 1)
+	assert.Equal(t, map[string]string{"a": "1", "b": "2"}, results2[0])
+	
+	// Verify cache is still populated (same as cached value)
+	assert.Equal(t, td.merged, results2[0])
+
+	// Append new data - should invalidate cache
+	require.NoError(t, tl.Append(ctx, "k1", t1.Add(2*time.Second), map[string]string{"c": "3"}, false))
+	assert.Nil(t, td.merged, "Cache should be invalidated after write")
+
+	// GetLatest after write - cache miss again, should recompute
+	results3, err := tl.GetLatest(ctx, []string{"k1"})
+	require.NoError(t, err)
+	require.Len(t, results3, 1)
+	assert.Equal(t, map[string]string{"a": "1", "b": "2", "c": "3"}, results3[0])
+
+	// Cache should be populated again
+	assert.NotNil(t, td.merged)
+	assert.Equal(t, map[string]string{"a": "1", "b": "2", "c": "3"}, td.merged)
+}
+
 func TestTimeline_BatchGetAt(t *testing.T) {
 	cli := NewClient().(*client)
 	tl := cli.Timeline("test_timeline")
@@ -471,6 +517,66 @@ func TestTimeline_BatchGetRange(t *testing.T) {
 
 	// missing key → nil
 	assert.Nil(t, results[2])
+}
+
+// TestTimeline_GetRangeIncrementalMerge tests the correctness of incremental merge optimization
+func TestTimeline_GetRangeIncrementalMerge(t *testing.T) {
+	cli := NewClient().(*client)
+	tl := cli.Timeline("test_timeline")
+	ctx := context.Background()
+	t0 := time.Now().Truncate(time.Microsecond) // Normalize to microsecond precision
+
+	// Build a timeline with overlapping field updates to stress-test incremental merge
+	// Point 0: A=1, B=1
+	require.NoError(t, tl.Append(ctx, "key1", t0, map[string]string{
+		"A": "1", "B": "1",
+	}, false))
+	
+	// Point 1: A=2, C=2 (B should carry forward)
+	require.NoError(t, tl.Append(ctx, "key1", t0.Add(time.Second), map[string]string{
+		"A": "2", "C": "2",
+	}, false))
+	
+	// Point 2: B=3 (A and C should carry forward)
+	require.NoError(t, tl.Append(ctx, "key1", t0.Add(2*time.Second), map[string]string{
+		"B": "3",
+	}, false))
+	
+	// Point 3: A=4, D=4 (B and C should carry forward)
+	require.NoError(t, tl.Append(ctx, "key1", t0.Add(3*time.Second), map[string]string{
+		"A": "4", "D": "4",
+	}, false))
+	
+	// Point 4: E=5 (all previous fields should carry forward)
+	require.NoError(t, tl.Append(ctx, "key1", t0.Add(4*time.Second), map[string]string{
+		"E": "5",
+	}, false))
+
+	// Query the full range
+	results, err := tl.GetRange(ctx, []string{"key1"}, t0, t0.Add(4*time.Second))
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Len(t, results[0], 5) // Should have 5 TimeValues
+
+	// Verify point 0: A=1, B=1
+	assert.Equal(t, t0, results[0][0].Time)
+	assert.Equal(t, map[string]string{"A": "1", "B": "1"}, results[0][0].Value)
+
+	// Verify point 1: A=2 (updated), B=1 (carried), C=2 (new)
+	assert.Equal(t, t0.Add(time.Second), results[0][1].Time)
+	assert.Equal(t, map[string]string{"A": "2", "B": "1", "C": "2"}, results[0][1].Value)
+
+	// Verify point 2: A=2 (carried), B=3 (updated), C=2 (carried)
+	assert.Equal(t, t0.Add(2*time.Second), results[0][2].Time)
+	assert.Equal(t, map[string]string{"A": "2", "B": "3", "C": "2"}, results[0][2].Value)
+
+	// Verify point 3: A=4 (updated), B=3 (carried), C=2 (carried), D=4 (new)
+	assert.Equal(t, t0.Add(3*time.Second), results[0][3].Time)
+	assert.Equal(t, map[string]string{"A": "4", "B": "3", "C": "2", "D": "4"}, results[0][3].Value)
+
+	// Verify point 4: All previous fields carried forward, E=5 (new)
+	assert.Equal(t, t0.Add(4*time.Second), results[0][4].Time)
+	assert.Equal(t, map[string]string{"A": "4", "B": "3", "C": "2", "D": "4", "E": "5"}, results[0][4].Value)
 }
 
 // --- GetUpdatedKeys tests ---
@@ -570,6 +676,44 @@ func TestTimeline_GetUpdatedKeys_ExactTimestampBoundary(t *testing.T) {
 	keys, err = tl.GetUpdatedKeys(ctx, t1)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"k2"}, keys)
+}
+
+// TestTimeline_GetUpdatedKeys_OutOfOrderInserts tests globalTS index with out-of-order inserts
+func TestTimeline_GetUpdatedKeys_OutOfOrderInserts(t *testing.T) {
+	cli := NewClient().(*client)
+	tl := cli.Timeline("test_timeline")
+
+	ctx := context.Background()
+	t1 := time.Now().Truncate(time.Microsecond)
+	t2 := t1.Add(2 * time.Second)
+	t3 := t1.Add(4 * time.Second)
+	t4 := t1.Add(6 * time.Second)
+
+	// Insert out of order: t3, t1, t4, t2
+	// globalTS should track the LATEST timestamp regardless of insertion order
+	require.NoError(t, tl.Insert(ctx, "k1", t3, map[string]string{"f": "v3"}, false))
+	require.NoError(t, tl.Insert(ctx, "k1", t1, map[string]string{"f": "v1"}, false))
+	require.NoError(t, tl.Insert(ctx, "k1", t4, map[string]string{"f": "v4"}, false))
+	require.NoError(t, tl.Insert(ctx, "k1", t2, map[string]string{"f": "v2"}, false))
+
+	// globalTS should be t4 (the latest timestamp)
+	// Query after t3.5 should return k1
+	keys, err := tl.GetUpdatedKeys(ctx, t3.Add(500*time.Millisecond))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k1"}, keys)
+
+	// Query after t4 should return empty (no updates after t4)
+	keys, err = tl.GetUpdatedKeys(ctx, t4)
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+
+	// Insert an older timestamp (t2) - should NOT update globalTS
+	require.NoError(t, tl.Insert(ctx, "k1", t2.Add(100*time.Millisecond), map[string]string{"f": "v2.1"}, false))
+
+	// globalTS should still be t4
+	keys, err = tl.GetUpdatedKeys(ctx, t3.Add(500*time.Millisecond))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k1"}, keys)
 }
 
 func TestTimeline_GetUpdatedKeys_ContextCancellation(t *testing.T) {

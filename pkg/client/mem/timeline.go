@@ -18,6 +18,9 @@ type memTimeline struct {
 	keyLabels map[string]map[string]bool
 	// labelIndex maps each label to the set of logical keys with that label (inverted index).
 	labelIndex map[string]map[string]bool
+	// globalTS maps each key to its latest update timestamp (microseconds since epoch).
+	// Used for efficient GetUpdatedKeys filtering.
+	globalTS   map[string]int64
 	mu         sync.RWMutex
 	client     *client
 }
@@ -25,6 +28,9 @@ type memTimeline struct {
 // timelineData holds all time points for a specific key.
 type timelineData struct {
 	points []timePoint
+	// merged is a lazy-initialized cache of the complete merged state.
+	// Set to nil on any write to invalidate. Populated on first GetLatest call.
+	merged map[string]string
 }
 
 // timePoint represents a moment in time with sparse field updates.
@@ -114,6 +120,8 @@ func (t *memTimeline) Append(ctx context.Context, key string, ts time.Time, data
 		for field, value := range data {
 			existing.fields[field] = value
 		}
+		// Invalidate merged cache since we modified the timeline
+		td.merged = nil
 	} else {
 		newPoint := timePoint{
 			ts:     tsMicros,
@@ -125,6 +133,15 @@ func (t *memTimeline) Append(ctx context.Context, key string, ts time.Time, data
 		td.points = append(td.points, timePoint{})
 		copy(td.points[idx+1:], td.points[idx:])
 		td.points[idx] = newPoint
+		// Invalidate merged cache since we added a new point
+		td.merged = nil
+	}
+
+	// Global timestamp index maintenance:
+	// Track the latest timestamp for this key to enable efficient GetUpdatedKeys filtering.
+	// Only update if this timestamp is newer than the current max (handles out-of-order inserts).
+	if currentMax, exists := t.globalTS[key]; !exists || tsMicros > currentMax {
+		t.globalTS[key] = tsMicros
 	}
 
 	t.enforceRetention(key, td)
@@ -165,18 +182,19 @@ func (t *memTimeline) GetAt(ctx context.Context, keys []string, ts time.Time) ([
 			results[i] = nil
 			continue
 		}
-		idx := -1
-		for j, point := range td.points {
-			if point.ts <= tsMicros {
-				idx = j
-			} else {
-				break
+		// Use binary search to find the latest time point at or before ts
+		idx, found := findTimePoint(td.points, tsMicros)
+		if !found {
+			// Not found exactly - idx is insertion point
+			// We want the point immediately before it (if any)
+			if idx == 0 {
+				// All points are after tsMicros
+				results[i] = nil
+				continue
 			}
+			idx = idx - 1
 		}
-		if idx == -1 {
-			results[i] = nil
-			continue
-		}
+		// idx now points to the latest point at or before tsMicros
 		results[i] = mergeFields(td.points[:idx+1])
 	}
 
@@ -249,15 +267,36 @@ func (t *memTimeline) GetRange(ctx context.Context, keys []string, start, end ti
 			results[i] = nil
 			continue
 		}
+		// Incremental merge optimization:
+		// Instead of calling mergeFields(td.points[:j+1]) for each point in range (O(n²×m)),
+		// we maintain a single accumulated state and iterate once (O(n×m)).
+		// For each point: (1) merge its fields, (2) snapshot if in range, (3) continue.
 		var tvs []*model.TimeValue
-		for j, point := range td.points {
+		accumulated := make(map[string]string)
+		
+		for _, point := range td.points {
+			// Merge this point's fields into accumulated state
+			for field, value := range point.fields {
+				accumulated[field] = value
+			}
+			
+			// If this point is in the query range, snapshot the accumulated state
 			if point.ts >= startMicros && point.ts <= endMicros {
-				merged := mergeFields(td.points[:j+1])
+				// Create a snapshot of the current accumulated state
+				snapshot := make(map[string]string, len(accumulated))
+				for k, v := range accumulated {
+					snapshot[k] = v
+				}
 				tv := &model.TimeValue{
 					Time:  time.UnixMicro(point.ts),
-					Value: merged,
+					Value: snapshot,
 				}
 				tvs = append(tvs, tv)
+			}
+			
+			// Early exit if we've passed the end of the range
+			if point.ts > endMicros {
+				break
 			}
 		}
 		results[i] = tvs // nil if no points in range
@@ -290,7 +329,17 @@ func (t *memTimeline) GetLatest(ctx context.Context, keys []string) ([]map[strin
 			results[i] = nil
 			continue
 		}
-		results[i] = mergeFields(td.points)
+		
+		// Check if merged cache is valid
+		if td.merged != nil {
+			// Cache hit - return cached merged state
+			results[i] = td.merged
+		} else {
+			// Cache miss - compute and cache the merged state
+			merged := mergeFields(td.points)
+			td.merged = merged
+			results[i] = merged
+		}
 	}
 
 	return results, be.OrNil()
@@ -530,6 +579,7 @@ func (t *memTimeline) Remove(ctx context.Context, keys []string) error {
 		}
 		delete(t.keyLabels, key)
 		delete(t.data, key)
+		delete(t.globalTS, key) // Clean up global timestamp index
 	}
 
 	return nil
@@ -553,6 +603,7 @@ func (t *memTimeline) Clear(ctx context.Context) error {
 	t.data = make(map[string]*timelineData)
 	t.keyLabels = make(map[string]map[string]bool)
 	t.labelIndex = make(map[string]map[string]bool)
+	t.globalTS = make(map[string]int64)
 
 	return nil
 }
@@ -603,13 +654,9 @@ func (t *memTimeline) GetUpdatedKeys(ctx context.Context, after time.Time) ([]st
 		return nil, ctx.Err()
 	}
 
+	// Use global timestamp index for efficient filtering
 	var result []string
-	for key, td := range t.data {
-		if len(td.points) == 0 {
-			continue
-		}
-		// Get the last timestamp for this key (points are sorted chronologically)
-		lastTs := td.points[len(td.points)-1].ts
+	for key, lastTs := range t.globalTS {
 		if lastTs > afterMicros {
 			result = append(result, key)
 		}
