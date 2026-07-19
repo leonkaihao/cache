@@ -39,6 +39,25 @@ func BenchmarkTimeline_GetAt(b *testing.B) {
 	}
 }
 
+func BenchmarkTimeline_GetAt_LargeTimeline(b *testing.B) {
+	cli := NewClient().(*client)
+	tl := cli.Timeline("bench_timeline_large")
+	ctx := context.Background()
+
+	// Setup: Add 10K points to stress-test binary search
+	now := time.Now()
+	for i := 0; i < 10000; i++ {
+		_ = tl.Append(ctx, "key1", now.Add(time.Duration(i)*time.Millisecond), map[string]string{
+			"field": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = tl.GetAt(ctx, []string{"key1"}, now.Add(5000*time.Millisecond))
+	}
+}
+
 func BenchmarkTimeline_GetRange(b *testing.B) {
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline")
@@ -55,6 +74,54 @@ func BenchmarkTimeline_GetRange(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = tl.GetRange(ctx, []string{"key1"}, now, now.Add(100*time.Millisecond))
+	}
+}
+
+func BenchmarkTimeline_GetRange_IncrementalMerge(b *testing.B) {
+	cli := NewClient().(*client)
+	tl := cli.Timeline("bench_timeline_inc")
+	ctx := context.Background()
+
+	// Setup: Add 1000 points with 10 fields each to stress-test merge performance
+	now := time.Now()
+	for i := 0; i < 1000; i++ {
+		data := make(map[string]string)
+		for j := 0; j < 10; j++ {
+			data[fmt.Sprintf("field%d", j)] = fmt.Sprintf("value%d_%d", i, j)
+		}
+		_ = tl.Append(ctx, "key1", now.Add(time.Duration(i)*time.Millisecond), data, false)
+	}
+
+	// Query a 100-point range to measure incremental merge efficiency
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = tl.GetRange(ctx, []string{"key1"}, now, now.Add(100*time.Millisecond))
+	}
+}
+
+// BenchmarkTimeline_GetLatest_CacheHit measures performance of consecutive GetLatest calls
+func BenchmarkTimeline_GetLatest_CacheHit(b *testing.B) {
+	cli := NewClient().(*client)
+	tl := cli.Timeline("bench_timeline_latest")
+	ctx := context.Background()
+
+	// Setup: Add 100 points with multiple fields
+	now := time.Now()
+	for i := 0; i < 100; i++ {
+		_ = tl.Append(ctx, "key1", now.Add(time.Duration(i)*time.Millisecond), map[string]string{
+			"field1": fmt.Sprintf("value%d", i),
+			"field2": fmt.Sprintf("value%d", i),
+			"field3": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+
+	// Prime the cache with one call
+	_, _ = tl.GetLatest(ctx, []string{"key1"})
+
+	b.ResetTimer()
+	// Measure consecutive reads (cache hits)
+	for i := 0; i < b.N; i++ {
+		_, _ = tl.GetLatest(ctx, []string{"key1"})
 	}
 }
 

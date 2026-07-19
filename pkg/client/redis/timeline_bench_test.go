@@ -454,3 +454,28 @@ func BenchmarkRedisTimeline_RetentionStrategies(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkRedisTimeline_Timeline measures pipelined Timeline performance
+func BenchmarkRedisTimeline_Timeline(b *testing.B) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("bench_timeline_timeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+	ctx := context.Background()
+
+	// Setup: Add 100 points with multiple fields to stress-test pipelining
+	base := time.Now()
+	for i := 0; i < 100; i++ {
+		_ = tl.Append(ctx, "key1", base.Add(time.Duration(i)*time.Millisecond), map[string]string{
+			"field1": fmt.Sprintf("value%d", i),
+			"field2": fmt.Sprintf("value%d", i),
+			"field3": fmt.Sprintf("value%d", i),
+		}, false)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = tl.Timeline(ctx, "key1")
+	}
+}

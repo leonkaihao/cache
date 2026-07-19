@@ -82,6 +82,7 @@ func (cli *client) Timeline(name string) model.CacheTimeline {
 			retention:  model.RetentionPolicy{Strategy: model.RetentionMax},
 			keyLabels:  make(map[string]map[string]bool),
 			labelIndex: make(map[string]map[string]bool),
+			globalTS:   make(map[string]int64),
 			client:     cli,
 		}
 		cli.timelines[name] = tl

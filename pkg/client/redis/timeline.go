@@ -540,7 +540,17 @@ func (t *redisTimeline) GetLatest(ctx context.Context, keys []string) ([]map[str
 	return results, be.OrNil()
 }
 
+// timelineHgetSpec describes a single HGetAll operation needed for Timeline pipelining.
+type timelineHgetSpec struct {
+	resultIdx     int   // Index in the result array
+	tsMicros      int64 // Result timestamp
+	mergeTsMicros int64 // Data timestamp to merge
+}
+
 // Timeline returns all complete states for the key in chronological order.
+// 
+// Pipelined implementation: Reduces N² individual HGetAll calls to 3 pipeline rounds.
+// For a 100-point timeline: 5,050 network RTTs → 3 RTTs (99.94% reduction).
 func (t *redisTimeline) Timeline(ctx context.Context, key string) ([]*model.TimeValue, error) {
 	select {
 	case <-ctx.Done():
@@ -555,31 +565,70 @@ func (t *redisTimeline) Timeline(ctx context.Context, key string) ([]*model.Time
 	redisCli := t.cli.getRedisCli()
 	tsKey := formatTimelineTS(t.name, key)
 
+	// Phase 1: Fetch all timestamps using ZRange
 	timestamps, err := redisCli.ZRange(ctx, tsKey, 0, -1).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to query timestamps: %w", err)
 	}
 
-	var result []*model.TimeValue
+	if len(timestamps) == 0 {
+		return nil, nil
+	}
+
+	// Phase 2: Build hgetSpecs for all (i,j) pairs where j ≤ i
+	// For each result timestamp i, we need to merge all data from timestamps 0..i.
+	// This creates a triangular number of specs: n=10 → 55 specs, n=100 → 5,050 specs.
+	var hgetSpecs []timelineHgetSpec
 	for i, tsStr := range timestamps {
 		tsMicros := mustParseInt64(tsStr)
-
-		merged := make(map[string]string)
+		// For this result timestamp, collect all timestamps <= it for merging
 		for j := 0; j <= i; j++ {
-			dataKey := formatTimelineData(t.name, key, mustParseInt64(timestamps[j]))
-			fields, err := redisCli.HGetAll(ctx, dataKey).Result()
-			if err != nil {
-				continue
-			}
-			for k, v := range fields {
-				merged[k] = v
-			}
+			hgetSpecs = append(hgetSpecs, timelineHgetSpec{
+				resultIdx:     i,
+				tsMicros:      tsMicros,
+				mergeTsMicros: mustParseInt64(timestamps[j]),
+			})
+		}
+	}
+
+	// Phase 3: Pipeline all HGetAll operations
+	pipe := redisCli.Pipeline()
+	hgetCmds := make([]*redis.MapStringStringCmd, len(hgetSpecs))
+	for i, spec := range hgetSpecs {
+		dataKey := formatTimelineData(t.name, key, spec.mergeTsMicros)
+		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
+	}
+
+	// Execute pipeline - may fail, but individual commands may have succeeded
+	_, _ = pipe.Exec(ctx)
+
+	// Phase 4: Reconstruct merged states from pipelined results
+	result := make([]*model.TimeValue, len(timestamps))
+	resultMerged := make([]map[string]string, len(timestamps))
+
+	for i, spec := range hgetSpecs {
+		fields, err := hgetCmds[i].Result()
+		if err != nil && err != redis.Nil {
+			// Skip failed fetches - partial data is acceptable
+			continue
 		}
 
-		result = append(result, &model.TimeValue{
+		if resultMerged[spec.resultIdx] == nil {
+			resultMerged[spec.resultIdx] = make(map[string]string)
+		}
+		// Merge fields in chronological order
+		for k, v := range fields {
+			resultMerged[spec.resultIdx][k] = v
+		}
+	}
+
+	// Build final result array
+	for i, tsStr := range timestamps {
+		tsMicros := mustParseInt64(tsStr)
+		result[i] = &model.TimeValue{
 			Time:  time.UnixMicro(tsMicros),
-			Value: merged,
-		})
+			Value: resultMerged[i],
+		}
 	}
 
 	return result, nil

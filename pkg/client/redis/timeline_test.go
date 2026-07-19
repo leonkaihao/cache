@@ -743,3 +743,53 @@ func TestRedisTimeline_GetUpdatedKeys_GlobalIndexCleanupAfterClear(t *testing.T)
 	require.NoError(t, err)
 	assert.Empty(t, keys)
 }
+
+// TestRedisTimeline_TimelinePipelining tests the pipelined Timeline implementation with 20 points
+func TestRedisTimeline_TimelinePipelining(t *testing.T) {
+	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	tl := cli.Timeline("test_timeline_pipeline")
+	defer func() {
+		_ = tl.Delete(context.Background())
+	}()
+
+	ctx := context.Background()
+	base := time.Now().Truncate(time.Microsecond)
+
+	// Build a timeline with 20 points, with overlapping field updates
+	for i := 0; i < 20; i++ {
+		ts := base.Add(time.Duration(i) * time.Second)
+		data := map[string]string{
+			"counter": fmt.Sprintf("%d", i),
+		}
+		// Add a new field every 5 points
+		if i%5 == 0 {
+			data[fmt.Sprintf("field%d", i/5)] = fmt.Sprintf("value%d", i)
+		}
+		require.NoError(t, tl.Append(ctx, "k1", ts, data, false))
+	}
+
+	// Fetch the complete timeline
+	timeline, err := tl.Timeline(ctx, "k1")
+	require.NoError(t, err)
+	require.Len(t, timeline, 20)
+
+	// Verify first point
+	assert.Equal(t, base, timeline[0].Time)
+	assert.Equal(t, "0", timeline[0].Value["counter"])
+	assert.Equal(t, "value0", timeline[0].Value["field0"])
+
+	// Verify middle point (index 10) has accumulated fields
+	assert.Equal(t, base.Add(10*time.Second), timeline[10].Time)
+	assert.Equal(t, "10", timeline[10].Value["counter"])
+	assert.Equal(t, "value0", timeline[10].Value["field0"])  // Carried from point 0
+	assert.Equal(t, "value5", timeline[10].Value["field1"])  // Carried from point 5
+	assert.Equal(t, "value10", timeline[10].Value["field2"]) // Added at point 10
+
+	// Verify last point (index 19) has all accumulated fields
+	assert.Equal(t, base.Add(19*time.Second), timeline[19].Time)
+	assert.Equal(t, "19", timeline[19].Value["counter"])
+	assert.Equal(t, "value0", timeline[19].Value["field0"])
+	assert.Equal(t, "value5", timeline[19].Value["field1"])
+	assert.Equal(t, "value10", timeline[19].Value["field2"])
+	assert.Equal(t, "value15", timeline[19].Value["field3"])
+}
