@@ -3,7 +3,7 @@
 [![CI](https://github.com/leonkaihao/cache/actions/workflows/ci.yml/badge.svg)](https://github.com/leonkaihao/cache/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/leonkaihao/cache/v2)](https://goreportcard.com/report/github.com/leonkaihao/cache/v2)
 [![codecov](https://codecov.io/gh/leonkaihao/cache/branch/master/graph/badge.svg)](https://codecov.io/gh/leonkaihao/cache)
-[![Bencher](https://img.shields.io/badge/Performance-Bencher-blue)](https://bencher.dev/perf/leonkaihao)
+[![Bencher](https://img.shields.io/badge/Performance-Bencher-blue)](https://bencher.dev/perf/project-leonkaihao-cache)
 [![Go Reference](https://pkg.go.dev/badge/github.com/leonkaihao/cache/v2.svg)](https://pkg.go.dev/github.com/leonkaihao/cache/v2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
