@@ -899,6 +899,12 @@ func (t *redisTimeline) Remove(ctx context.Context, keys []string) error {
 }
 
 // Clear removes all data from the timeline but keeps the timeline instance.
+// Clear removes all data from the timeline using prefix-based scanning.
+// This ensures complete cleanup including any orphaned keys not tracked in sets.
+//
+// Clear is intended for startup/reload scenarios. It is non-atomic - keys added
+// during the scan may not be deleted. All keys matching "T@{name}/*" are removed,
+// including data hashes, timestamp indexes, label indexes, and tracking sets.
 func (t *redisTimeline) Clear(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
@@ -907,45 +913,9 @@ func (t *redisTimeline) Clear(ctx context.Context) error {
 	}
 
 	redisCli := t.cli.getRedisCli()
-	keysKey := formatTimelineKeys(t.name)
+	pattern := fmt.Sprintf("%s%s/*", consts.TIMELINE_PREFIX, t.name)
 
-	// Get all keys and remove them (which also cleans up label indexes).
-	keys, err := redisCli.SMembers(ctx, keysKey).Result()
-	if err != nil {
-		return fmt.Errorf("failed to get keys: %w", err)
-	}
-	if len(keys) > 0 {
-		if err := t.Remove(ctx, keys); err != nil {
-			return err
-		}
-	}
-
-	// Clear label name set and all inverted label sets.
-	labelsKey := formatTimelineLabels(t.name)
-	labelNames, err := redisCli.SMembers(ctx, labelsKey).Result()
-	if err != nil && err != redis.Nil {
-		return fmt.Errorf("failed to get label names: %w", err)
-	}
-	if len(labelNames) > 0 {
-		pipe := redisCli.Pipeline()
-		for _, label := range labelNames {
-			pipe.Del(ctx, formatTimelineLabel(t.name, label))
-		}
-		pipe.Del(ctx, labelsKey)
-		if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-			return fmt.Errorf("failed to delete label sets: %w", err)
-		}
-	} else {
-		_ = redisCli.Del(ctx, labelsKey)
-	}
-
-	// Clear global timestamp index.
-	globalTSKey := formatTimelineGlobalTS(t.name)
-	if err := redisCli.Del(ctx, globalTSKey).Err(); err != nil {
-		return fmt.Errorf("failed to delete global timestamp index: %w", err)
-	}
-
-	return nil
+	return scanAndDeleteByPrefix(ctx, redisCli, pattern)
 }
 
 // Delete removes the timeline instance from the client.

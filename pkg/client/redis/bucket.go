@@ -291,55 +291,19 @@ func (bkt *bucket[T]) Delete(ctx context.Context) error {
 	return nil
 }
 
+// clear removes all keys in the bucket using prefix-based scanning.
+// This ensures complete cleanup including any orphaned keys not tracked in sets.
+//
+// Clear is intended for startup/reload scenarios. It is non-atomic - keys added
+// during the scan may not be deleted. All keys matching "B@{name}/*" are removed.
 func (bkt *bucket[T]) clear(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, bkt.timeout)
 	defer cancel()
 
 	redisCli := bkt.cli.getRedisCli()
+	pattern := fmt.Sprintf("%s%s/*", consts.BUCKET_PREFIX, bkt.name)
 
-	keys, err := redisCli.SMembers(ctx, formatBucketKeys(bkt)).Result()
-	if err != nil && err != goredis.Nil {
-		return fmt.Errorf("fail to get members of bucket keyset %v: %w", formatBucketKeys(bkt), err)
-	}
-
-	// Delete all documents
-	if len(keys) > 0 {
-		docKeys := make([]string, len(keys))
-		for i, key := range keys {
-			docKeys[i] = formatDocKey(bkt, key)
-		}
-		if err := redisCli.Del(ctx, docKeys...).Err(); err != nil {
-			return fmt.Errorf("fail to delete doc keys: %w", err)
-		}
-	}
-
-	// Delete bucket keys set
-	if err := redisCli.Del(ctx, formatBucketKeys(bkt)).Err(); err != nil {
-		return fmt.Errorf("fail to delete bucket keys set: %w", err)
-	}
-
-	// Delete labels
-	labels, err := redisCli.SMembers(ctx, formatBucketLabels(bkt)).Result()
-	if err != nil && err != goredis.Nil {
-		return fmt.Errorf("fail to get members of bucket labelset %v: %w", formatBucketLabels(bkt), err)
-	}
-
-	if len(labels) > 0 {
-		labelKeys := make([]string, len(labels))
-		for i, label := range labels {
-			labelKeys[i] = formatLabel(bkt, label)
-		}
-		if err := redisCli.Del(ctx, labelKeys...).Err(); err != nil {
-			return fmt.Errorf("fail to delete label keys: %w", err)
-		}
-	}
-
-	// Delete bucket labels set
-	if err := redisCli.Del(ctx, formatBucketLabels(bkt)).Err(); err != nil {
-		return fmt.Errorf("fail to delete bucket labels set: %w", err)
-	}
-
-	return nil
+	return scanAndDeleteByPrefix(ctx, redisCli, pattern)
 }
 
 func arrToMap(src []string) map[string]bool {

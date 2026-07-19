@@ -209,31 +209,16 @@ func (clt *collection) clear(ctx context.Context, key string) error {
 	return nil
 }
 
+// clearAll removes all keys in the collection using prefix-based scanning.
+// This ensures complete cleanup including any orphaned keys not tracked in sets.
+//
+// ClearAll is intended for startup/reload scenarios. It is non-atomic - keys added
+// during the scan may not be deleted. All keys matching "C@{name}/*" are removed.
 func (clt *collection) clearAll(ctx context.Context) error {
 	cli := clt.cli.getRedisCli()
+	pattern := fmt.Sprintf("%s%s/*", consts.CLT_PREFIX, clt.Name())
 
-	members, err := cli.SMembers(ctx, formatCollectionKeys(clt)).Result()
-	if err != nil && err != goredis.Nil {
-		return fmt.Errorf("fail to get members of Set keys %v: %w", formatCollectionKeys(clt), err)
-	}
-
-	if len(members) > 0 {
-		memberKeys := make([]string, len(members))
-		for i, key := range members {
-			memberKeys[i] = formatCollectionKey(clt, key)
-		}
-
-		if err := cli.Del(ctx, memberKeys...).Err(); err != nil {
-			return fmt.Errorf("fail to delete collection members: %w", err)
-		}
-	}
-
-	// Clear the keys set itself
-	if err := cli.Del(ctx, formatCollectionKeys(clt)).Err(); err != nil {
-		return fmt.Errorf("fail to delete collection keys set: %w", err)
-	}
-
-	return nil
+	return scanAndDeleteByPrefix(ctx, cli, pattern)
 }
 
 func (clt *collection) Delete(ctx context.Context) error {

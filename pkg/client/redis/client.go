@@ -1,6 +1,8 @@
 package redis
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -124,5 +126,60 @@ func (cli *client) RemoveTimeline(name string) error {
 	defer cli.mu.Unlock()
 
 	delete(cli.timelines, name)
+	return nil
+}
+
+// scanAndDeleteByPrefix scans all keys matching the given pattern and deletes them in batches.
+// This provides thorough cleanup without relying on tracking sets, ensuring orphaned keys are removed.
+//
+// The operation is non-atomic - keys added during scanning may not be deleted.
+// This is acceptable for startup/reload scenarios where no concurrent writes are expected.
+//
+// Pattern examples: "B@bucket-name/*", "C@collection-name/*", "T@timeline-name/*"
+func scanAndDeleteByPrefix(ctx context.Context, redisCli *redis.Client, pattern string) error {
+	const batchSize = 100
+
+	var cursor uint64
+	var allKeys []string
+
+	// Scan all keys matching pattern
+	for {
+		keys, nextCursor, err := redisCli.Scan(ctx, cursor, pattern, batchSize).Result()
+		if err != nil {
+			return fmt.Errorf("scan failed for pattern %s: %w", pattern, err)
+		}
+
+		allKeys = append(allKeys, keys...)
+		cursor = nextCursor
+
+		if cursor == 0 {
+			break
+		}
+	}
+
+	// No keys to delete
+	if len(allKeys) == 0 {
+		return nil
+	}
+
+	// Delete in batches using pipeline
+	for i := 0; i < len(allKeys); i += batchSize {
+		end := i + batchSize
+		if end > len(allKeys) {
+			end = len(allKeys)
+		}
+
+		batch := allKeys[i:end]
+		pipe := redisCli.Pipeline()
+
+		for _, key := range batch {
+			pipe.Unlink(ctx, key)
+		}
+
+		if _, err := pipe.Exec(ctx); err != nil {
+			return fmt.Errorf("batch delete failed: %w", err)
+		}
+	}
+
 	return nil
 }
