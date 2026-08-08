@@ -216,11 +216,11 @@ func (suite *TimelineTestSuite) TestRetentionPolicy(t *testing.T) {
 
 	ctx := context.Background()
 
-	tl.WithRetention(model.RetentionPolicy{
+	tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
 		MaxCount:    2,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
-	})
+	}})
 
 	base := time.Now()
 	_ = tl.Append(ctx, "key1", base, map[string]string{"v": "1"}, false)

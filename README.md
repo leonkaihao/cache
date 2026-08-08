@@ -70,10 +70,12 @@ ctx := context.Background()
 timeline := cli.Timeline("device_states")
 
 // Set retention policy (config-driven, in-memory)
-timeline.WithRetention(model.RetentionPolicy{
-    MaxCount:    100,
-    MaxDuration: 2 * time.Hour,
-    Strategy:    model.RetentionMax,
+timeline.WithOptions(model.TimelineOptions{
+    Retention: model.RetentionPolicy{
+        MaxCount:    100,
+        MaxDuration: 2 * time.Hour,
+        Strategy:    model.RetentionMax,
+    },
 })
 
 // Record device state
@@ -292,10 +294,14 @@ type CacheCollection interface {
 
 ### CacheTimeline
 
-Time-indexed state storage for managing historical data:
+Time-indexed state storage for managing historical data. The interface is composed of:
+
+- **TimelineData** — data operations (write, query, lifecycle)
+- **TimelineLabels** — label management and filtering
+- **Options** — configuration management
 
 ```go
-type CacheTimeline interface {
+type TimelineData interface {
     Name() string
     
     // Write operations
@@ -309,22 +315,29 @@ type CacheTimeline interface {
     GetLatest(ctx context.Context, keys []string) ([]map[string]string, error)
     Timeline(ctx context.Context, key string) ([]*TimeValue, error)
     GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]*TimeValue, error)
-    
-    // Retention management (config-driven, in-memory)
-    WithRetention(policy RetentionPolicy) CacheTimeline
-    GetRetention() RetentionPolicy
-    
-    // Label management
-    AddKeyLabels(ctx context.Context, key string, labels []string) error
-    RemoveKeyLabels(ctx context.Context, key string, labels []string) error
-    KeyLabels(ctx context.Context, key string) (LabelSet, error)
-    
-    // Management (Keys supports label-based filtering: OR within array, AND between arrays)
-    Keys(ctx context.Context, labelFilters ...[]string) ([]string, error)
     GetUpdatedKeys(ctx context.Context, after time.Time) ([]string, error)
+    
+    // Management
     Remove(ctx context.Context, keys []string) error
     Clear(ctx context.Context) error
     Delete(ctx context.Context) error
+}
+
+type TimelineLabels interface {
+    // Keys supports label-based filtering: OR within array, AND between arrays
+    Keys(ctx context.Context, labelFilters ...[]string) ([]string, error)
+    AddKeyLabels(ctx context.Context, key string, labels []string) error
+    RemoveKeyLabels(ctx context.Context, key string, labels []string) error
+    KeyLabels(ctx context.Context, key string) (LabelSet, error)
+}
+
+type CacheTimeline interface {
+    TimelineData
+    TimelineLabels
+    
+    // Options management (config-driven, in-memory)
+    WithOptions(opts TimelineOptions) CacheTimeline
+    GetOptions() TimelineOptions
 }
 ```
 

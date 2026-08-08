@@ -975,21 +975,21 @@ func (t *redisTimeline) Delete(ctx context.Context) error {
 	return t.cli.RemoveTimeline(t.name)
 }
 
-// WithRetention sets the retention policy for the timeline and returns self for method chaining.
-// The policy applies to all keys in the timeline and is stored in-memory only.
-func (t *redisTimeline) WithRetention(policy model.RetentionPolicy) model.CacheTimeline {
+// WithOptions sets the configuration options for the timeline and returns self for method chaining.
+// The options apply to all keys in the timeline and are stored in-memory only.
+func (t *redisTimeline) WithOptions(opts model.TimelineOptions) model.CacheTimeline {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.retention = policy
+	t.retention = opts.Retention
 	return t
 }
 
-// GetRetention returns the timeline's retention policy.
-// Returns zero values if no policy has been set (meaning unlimited retention).
-func (t *redisTimeline) GetRetention() model.RetentionPolicy {
+// GetOptions returns the timeline's configuration options.
+// Returns zero values if no options have been set (meaning unlimited retention).
+func (t *redisTimeline) GetOptions() model.TimelineOptions {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.retention
+	return model.TimelineOptions{Retention: t.retention}
 }
 
 // GetUpdatedKeys returns all keys that have been updated after the specified timestamp.

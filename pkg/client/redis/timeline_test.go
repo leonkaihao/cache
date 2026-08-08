@@ -87,11 +87,11 @@ func TestRedisTimeline_RetentionPolicy(t *testing.T) {
 	ctx := context.Background()
 
 	// Test MaxCount retention
-	tl.WithRetention(model.RetentionPolicy{
+	tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
 		MaxCount:    2,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
-	})
+	}})
 
 	// Write 3 points
 	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -126,11 +126,11 @@ func TestRedisTimeline_RetentionDurationOnly(t *testing.T) {
 	ctx := context.Background()
 
 	// Test duration-only retention
-	tl.WithRetention(model.RetentionPolicy{
+	tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
 		MaxCount:    0,
 		MaxDuration: 2 * time.Hour,
 		Strategy:    model.RetentionMax,
-	})
+	}})
 
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	t1 := base
@@ -169,11 +169,11 @@ func TestRedisTimeline_RetentionStrategies(t *testing.T) {
 		ctx := context.Background()
 
 		// RetentionMax: keep MORE data (union of constraints)
-		tl.WithRetention(model.RetentionPolicy{
+		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
 			MaxCount:    3,
 			MaxDuration: 90 * time.Minute,
 			Strategy:    model.RetentionMax,
-		})
+	}})
 
 		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		var err error
@@ -200,11 +200,11 @@ func TestRedisTimeline_RetentionStrategies(t *testing.T) {
 		ctx := context.Background()
 
 		// RetentionMin: keep LESS data (intersection of constraints)
-		tl.WithRetention(model.RetentionPolicy{
+		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
 			MaxCount:    3,
 			MaxDuration: 90 * time.Minute,
 			Strategy:    model.RetentionMin,
-		})
+	}})
 
 		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		var err error
@@ -234,11 +234,11 @@ func TestRedisTimeline_RetentionBoundaryEdgeCases(t *testing.T) {
 
 		ctx := context.Background()
 
-		tl.WithRetention(model.RetentionPolicy{
+		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
 			MaxCount:    3,
 			MaxDuration: 0,
 			Strategy:    model.RetentionMax,
-		})
+	}})
 
 		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		var err error
@@ -262,11 +262,11 @@ func TestRedisTimeline_RetentionBoundaryEdgeCases(t *testing.T) {
 
 		ctx := context.Background()
 
-		tl.WithRetention(model.RetentionPolicy{
+		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
 			MaxCount:    1,
 			MaxDuration: 0,
 			Strategy:    model.RetentionMax,
-		})
+	}})
 
 		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		var err error
@@ -291,11 +291,11 @@ func TestRedisTimeline_RetentionBoundaryEdgeCases(t *testing.T) {
 
 		ctx := context.Background()
 
-		tl.WithRetention(model.RetentionPolicy{
+		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
 			MaxCount:    2,
 			MaxDuration: 1 * time.Hour,
 			Strategy:    model.RetentionMax,
-		})
+	}})
 
 		// Query empty timeline - should not error
 		timeline, err := tl.Timeline(ctx, "k1")
@@ -314,11 +314,11 @@ func TestRedisTimeline_RetentionConcurrency(t *testing.T) {
 	ctx := context.Background()
 
 	// Set retention
-	tl.WithRetention(model.RetentionPolicy{
+	tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
 		MaxCount:    10,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
-	})
+	}})
 
 	// Concurrent writes to same key
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -349,11 +349,11 @@ func TestRedisTimeline_RetentionRedisCleanup(t *testing.T) {
 	ctx := context.Background()
 
 	// Set retention
-	tl.WithRetention(model.RetentionPolicy{
+	tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
 		MaxCount:    2,
 		MaxDuration: 0,
 		Strategy:    model.RetentionMax,
-	})
+	}})
 
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	t1 := base

@@ -5,10 +5,10 @@ import (
 	"time"
 )
 
-// CacheTimeline provides time-indexed state storage where multiple versions
+// TimelineData provides time-indexed state storage where multiple versions
 // of state coexist at different timestamps. It supports sparse field updates,
 // out-of-order insertion, and time-based queries.
-type CacheTimeline interface {
+type TimelineData interface {
 	// Name returns the timeline name.
 	Name() string
 
@@ -58,15 +58,25 @@ type CacheTimeline interface {
 	// Each element is a non-nil *TimeValue pointer.
 	GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]*TimeValue, error)
 
-	// WithRetention sets the retention policy for the timeline and returns self for method chaining.
-	// The policy applies to all keys in the timeline.
-	// Retention policy is stored in-memory only and must be set after timeline creation.
-	WithRetention(policy RetentionPolicy) CacheTimeline
+	// GetUpdatedKeys returns all keys that have been updated after the specified timestamp.
+	// The timestamp boundary is exclusive: only keys with updates strictly after the timestamp are returned.
+	// Each key appears at most once in the result, even if it was updated multiple times.
+	// Result order is unordered and implementation-defined.
+	// Returns an empty slice if no keys were updated after the timestamp.
+	GetUpdatedKeys(ctx context.Context, after time.Time) ([]string, error)
 
-	// GetRetention returns the timeline's retention policy.
-	// Returns zero values (MaxCount: 0, MaxDuration: 0) if no policy has been set, meaning unlimited retention.
-	GetRetention() RetentionPolicy
+	// Remove removes the specified keys from the timeline.
+	Remove(ctx context.Context, keys []string) error
 
+	// Clear removes all data from the timeline but keeps the timeline instance.
+	Clear(ctx context.Context) error
+
+	// Delete removes the timeline instance from the client.
+	Delete(ctx context.Context) error
+}
+
+// TimelineLabels provides label management for timeline keys.
+type TimelineLabels interface {
 	// Keys returns all logical keys in the timeline.
 	// With no label filter arguments, all keys are returned.
 	// Labels within a single []string argument are OR'd together.
@@ -85,28 +95,31 @@ type CacheTimeline interface {
 	// KeyLabels returns the set of labels associated with a logical key.
 	// Returns an empty LabelSet if the key has no labels or does not exist.
 	KeyLabels(ctx context.Context, key string) (LabelSet, error)
+}
 
-	// GetUpdatedKeys returns all keys that have been updated after the specified timestamp.
-	// The timestamp boundary is exclusive: only keys with updates strictly after the timestamp are returned.
-	// Each key appears at most once in the result, even if it was updated multiple times.
-	// Result order is unordered and implementation-defined.
-	// Returns an empty slice if no keys were updated after the timestamp.
-	GetUpdatedKeys(ctx context.Context, after time.Time) ([]string, error)
+// CacheTimeline combines data operations and label management with configuration options.
+type CacheTimeline interface {
+	TimelineData
+	TimelineLabels
 
-	// Remove removes the specified keys from the timeline.
-	Remove(ctx context.Context, keys []string) error
+	// WithOptions sets the configuration options for the timeline and returns self for method chaining.
+	// The options apply to all keys in the timeline.
+	// Options are stored in-memory only and must be set after timeline creation.
+	WithOptions(opts TimelineOptions) CacheTimeline
 
-	// Clear removes all data from the timeline but keeps the timeline instance.
-	Clear(ctx context.Context) error
-
-	// Delete removes the timeline instance from the client.
-	Delete(ctx context.Context) error
+	// GetOptions returns the timeline's configuration options.
+	GetOptions() TimelineOptions
 }
 
 // TimeValue represents a moment in time with its associated complete state.
 type TimeValue struct {
 	Time  time.Time
 	Value map[string]string
+}
+
+// TimelineOptions defines configuration options for a timeline.
+type TimelineOptions struct {
+	Retention RetentionPolicy // Automatic data lifecycle management rules
 }
 
 // RetentionPolicy defines automatic data lifecycle management rules.

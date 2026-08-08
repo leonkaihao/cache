@@ -230,11 +230,11 @@ func timelineOperations(ctx context.Context, cli model.CacheClient) error {
 	timeline := cli.Timeline("device_states")
 
 	// Set retention policy: keep last 100 updates or 2 hours (config-driven, in-memory)
-	timeline.WithRetention(model.RetentionPolicy{
+	timeline.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
 		MaxCount:    100,
 		MaxDuration: 2 * time.Hour,
 		Strategy:    model.RetentionMax,
-	})
+	}})
 
 	// Record device state at different timestamps
 	now := time.Now()
