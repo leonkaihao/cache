@@ -218,7 +218,7 @@ func TestTimeline_ManagementOperations(t *testing.T) {
 	_ = tl.Append(ctx, "key2", now, map[string]string{"f": "v"}, false)
 
 	// Test Keys()
-	keys, err := tl.Keys(ctx)
+	keys, err := tl.Keys(ctx, model.FilterOptions{})
 	require.NoError(t, err)
 	assert.Len(t, keys, 2)
 
@@ -226,7 +226,7 @@ func TestTimeline_ManagementOperations(t *testing.T) {
 	err = tl.Remove(ctx, []string{"key1"})
 	require.NoError(t, err)
 
-	keys, err = tl.Keys(ctx)
+	keys, err = tl.Keys(ctx, model.FilterOptions{})
 	require.NoError(t, err)
 	assert.Len(t, keys, 1)
 
@@ -234,7 +234,7 @@ func TestTimeline_ManagementOperations(t *testing.T) {
 	err = tl.Clear(ctx)
 	require.NoError(t, err)
 
-	keys, err = tl.Keys(ctx)
+	keys, err = tl.Keys(ctx, model.FilterOptions{})
 	require.NoError(t, err)
 	assert.Len(t, keys, 0)
 }
@@ -302,32 +302,32 @@ func TestTimeline_KeysWithLabelFilter(t *testing.T) {
 	require.NoError(t, tl.AddKeyLabels(ctx, "k3", []string{"foo", "bee"}))
 
 	// No filter — all keys
-	keys, err := tl.Keys(ctx)
+	keys, err := tl.Keys(ctx, model.FilterOptions{})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"k1", "k2", "k3"}, keys)
 
 	// Single label filter — OR within step
-	keys, err = tl.Keys(ctx, []string{"foo"})
+	keys, err = tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"foo"}}})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"k1", "k3"}, keys)
 
 	// OR within one step: "bar" OR "bee" → k2, k3
-	keys, err = tl.Keys(ctx, []string{"bar", "bee"})
+	keys, err = tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"bar", "bee"}}})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"k2", "k3"}, keys)
 
 	// AND across two steps: ("foo" OR "bar") AND "new" → k1, k2
-	keys, err = tl.Keys(ctx, []string{"foo", "bar"}, []string{"new"})
+	keys, err = tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"foo", "bar"}, {"new"}}})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"k1", "k2"}, keys)
 
 	// AND with no intersection: "bee" AND "new" → empty
-	keys, err = tl.Keys(ctx, []string{"bee"}, []string{"new"})
+	keys, err = tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"bee"}, {"new"}}})
 	require.NoError(t, err)
 	assert.Empty(t, keys)
 
 	// Unknown label → empty
-	keys, err = tl.Keys(ctx, []string{"nosuchlabel"})
+	keys, err = tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"nosuchlabel"}}})
 	require.NoError(t, err)
 	assert.Empty(t, keys)
 }
@@ -349,7 +349,7 @@ func TestTimeline_LabelCleanupOnRemove(t *testing.T) {
 	require.NoError(t, tl.Remove(ctx, []string{"k1"}))
 
 	// Keys(ctx, []string{"alpha"}) should return only k2
-	keys, err := tl.Keys(ctx, []string{"alpha"})
+	keys, err := tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"alpha"}}})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"k2"}, keys)
 
@@ -371,12 +371,12 @@ func TestTimeline_LabelCleanupOnClear(t *testing.T) {
 	require.NoError(t, tl.Clear(ctx))
 
 	// After clear, Keys returns empty
-	keys, err := tl.Keys(ctx)
+	keys, err := tl.Keys(ctx, model.FilterOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, keys)
 
 	// Label filter also returns empty
-	keys, err = tl.Keys(ctx, []string{"alpha"})
+	keys, err = tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"alpha"}}})
 	require.NoError(t, err)
 	assert.Empty(t, keys)
 }

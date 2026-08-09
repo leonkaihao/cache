@@ -744,7 +744,7 @@ func (t *redisTimeline) GetAffectedRange(ctx context.Context, key string, insert
 }
 
 // Keys returns all logical keys, optionally filtered by labels.
-func (t *redisTimeline) Keys(ctx context.Context, labelFilters ...[]string) ([]string, error) {
+func (t *redisTimeline) Keys(ctx context.Context, opt model.FilterOptions) ([]string, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -753,6 +753,7 @@ func (t *redisTimeline) Keys(ctx context.Context, labelFilters ...[]string) ([]s
 
 	redisCli := t.cli.getRedisCli()
 	keysKey := formatTimelineKeys(t.name)
+	labelFilters := opt.LabelFilter
 
 	if len(labelFilters) == 0 {
 		result, err := redisCli.SMembers(ctx, keysKey).Result()

@@ -123,23 +123,23 @@ func bucketOperations(ctx context.Context, cli model.CacheClient) error {
 	_ = ls1.CheckOr([]string{"label3", "label4"})  // false
 
 	// Search with label
-	_, err = fooBkt1.Filter(ctx, []string{"label1"}) // doc1
+	_, err = fooBkt1.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"label1"}}}) // doc1
 	if err != nil {
 		return err
 	}
-	_, err = fooBkt1.Filter(ctx, []string{"label2"}) // doc1, doc3
+	_, err = fooBkt1.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"label2"}}}) // doc1, doc3
 	if err != nil {
 		return err
 	}
-	_, err = fooBkt1.Filter(ctx, []string{"label3"}) // doc3
+	_, err = fooBkt1.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"label3"}}}) // doc3
 	if err != nil {
 		return err
 	}
-	_, err = fooBkt1.Filter(ctx, []string{"label1", "label3"}) // doc1, doc3
+	_, err = fooBkt1.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"label1", "label3"}}}) // doc1, doc3
 	if err != nil {
 		return err
 	}
-	keys1, err := fooBkt1.Filter(ctx, []string{}) // all: doc1, doc3
+	keys1, err := fooBkt1.Keys(ctx, model.FilterOptions{}) // all: doc1, doc3
 	if err != nil {
 		return err
 	}
@@ -305,7 +305,7 @@ func timelineOperations(ctx context.Context, cli model.CacheClient) error {
 	log.Printf("Total timeline points: %d\n", len(allStates))
 
 	// List all keys in timeline
-	keys, err := timeline.Keys(ctx)
+	keys, err := timeline.Keys(ctx, model.FilterOptions{})
 	if err != nil {
 		return err
 	}

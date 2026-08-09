@@ -317,6 +317,9 @@ type TimelineData interface {
     GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]*TimeValue, error)
     GetUpdatedKeys(ctx context.Context, after time.Time) ([]string, error)
     
+    // Keys supports label-based filtering: OR within array, AND between arrays
+    Keys(ctx context.Context, opt FilterOptions) ([]string, error)
+    
     // Management
     Remove(ctx context.Context, keys []string) error
     Clear(ctx context.Context) error
@@ -324,8 +327,6 @@ type TimelineData interface {
 }
 
 type TimelineLabels interface {
-    // Keys supports label-based filtering: OR within array, AND between arrays
-    Keys(ctx context.Context, labelFilters ...[]string) ([]string, error)
     AddKeyLabels(ctx context.Context, key string, labels []string) error
     RemoveKeyLabels(ctx context.Context, key string, labels []string) error
     KeyLabels(ctx context.Context, key string) (LabelSet, error)
@@ -551,22 +552,28 @@ hasIndoor := labels.CheckOr([]string{"indoor", "outdoor"})  // true
 
 // Filter keys by labels (OR within array, AND between arrays)
 // All keys with no filter
-allKeys, err := timeline.Keys(ctx)
+allKeys, err := timeline.Keys(ctx, model.FilterOptions{})
 
 // Keys with "outdoor" label
-outdoorKeys, err := timeline.Keys(ctx, []string{"outdoor"})
+outdoorKeys, err := timeline.Keys(ctx, model.FilterOptions{
+    LabelFilter: [][]string{{"outdoor"}},
+})
 // Returns: ["device_A", "device_C"]
 
 // Keys with "sensor" OR "actuator" label
-deviceKeys, err := timeline.Keys(ctx, []string{"sensor", "actuator"})
+deviceKeys, err := timeline.Keys(ctx, model.FilterOptions{
+    LabelFilter: [][]string{{"sensor", "actuator"}},
+})
 // Returns: ["device_A", "device_B", "device_C"]
 
 // Keys matching (outdoor OR indoor) AND region-west AND sensor
-westSensors, err := timeline.Keys(ctx, 
-    []string{"outdoor", "indoor"},  // OR: any of these
-    []string{"region-west"},         // AND this
-    []string{"sensor"},              // AND this
-)
+westSensors, err := timeline.Keys(ctx, model.FilterOptions{
+    LabelFilter: [][]string{
+        {"outdoor", "indoor"},  // OR: any of these
+        {"region-west"},         // AND this
+        {"sensor"},              // AND this
+    },
+})
 // Returns: ["device_A", "device_B"]
 
 // Combine label filtering with batch queries

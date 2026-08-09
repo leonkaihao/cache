@@ -421,9 +421,9 @@ func (t *memTimeline) GetAffectedRange(ctx context.Context, key string, inserted
 }
 
 // Keys returns all logical keys, optionally filtered by labels.
-// With no arguments returns all keys. Labels within one []string are OR'd;
+// With no filter options returns all keys. Labels within one []string are OR'd;
 // multiple arguments are AND'd.
-func (t *memTimeline) Keys(ctx context.Context, labelFilters ...[]string) ([]string, error) {
+func (t *memTimeline) Keys(ctx context.Context, opt model.FilterOptions) ([]string, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -436,6 +436,8 @@ func (t *memTimeline) Keys(ctx context.Context, labelFilters ...[]string) ([]str
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+
+	labelFilters := opt.LabelFilter
 
 	if len(labelFilters) == 0 {
 		result := make([]string, 0, len(t.data))

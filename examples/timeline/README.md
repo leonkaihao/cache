@@ -74,14 +74,18 @@ timeline.AddKeyLabels(ctx, "device_B", []string{"sensor", "indoor", "region-west
 timeline.AddKeyLabels(ctx, "device_C", []string{"actuator", "outdoor", "region-east"})
 
 // Filter by labels (OR within array, AND between arrays)
-outdoorKeys, err := timeline.Keys(ctx, []string{"outdoor"})
+outdoorKeys, err := timeline.Keys(ctx, model.FilterOptions{
+    LabelFilter: [][]string{{"outdoor"}},
+})
 // Returns: ["device_A", "device_C"]
 
-westSensors, err := timeline.Keys(ctx, 
-    []string{"outdoor", "indoor"},  // OR
-    []string{"region-west"},         // AND
-    []string{"sensor"},              // AND
-)
+westSensors, err := timeline.Keys(ctx, model.FilterOptions{
+    LabelFilter: [][]string{
+        {"outdoor", "indoor"},  // OR
+        {"region-west"},         // AND
+        {"sensor"},              // AND
+    },
+})
 // Returns: ["device_A", "device_B"]
 
 // Query filtered devices

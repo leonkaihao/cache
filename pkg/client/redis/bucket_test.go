@@ -22,7 +22,7 @@ type testData struct {
 
 func expectFilter(t *testing.T, bkt model.CacheBucket, filters [][]string, sz int) {
 	ctx := context.Background()
-	result, err := bkt.Filter(ctx, filters...)
+	result, err := bkt.Keys(ctx, model.FilterOptions{LabelFilter: filters})
 	require.NoError(t, err)
 	if len(result) != sz {
 		t.Errorf("expect get %v results from filter %v, but got %v", sz, filters, len(result))
@@ -279,7 +279,7 @@ func TestBucketConcurrent(t *testing.T) {
 	}()
 
 	wg.Wait()
-	result, err := bkt.Filter(ctx, nil)
+	result, err := bkt.Keys(ctx, model.FilterOptions{})
 	require.NoError(t, err)
 	assert.Len(t, result, 0, "%v docs left, expect 0", len(result))
 }
@@ -374,7 +374,7 @@ func BenchmarkFilter1000Label1(b *testing.B) {
 	}
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
-		results, _ := bkt.Filter(ctx, []string{"label1"})
+		results, _ := bkt.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"label1"}}})
 		if len(results) != 1000 {
 			b.Errorf("expect 1000 got %v", len(results))
 		}
@@ -395,7 +395,7 @@ func BenchmarkFilter1000Label8(b *testing.B) {
 	}
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
-		results, _ := bkt.Filter(ctx, []string{"label1", "label2"}, []string{"label3", "label4"}, []string{"label5", "label6"}, []string{"label7", "label8"})
+		results, _ := bkt.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"label1", "label2"}, {"label3", "label4"}, {"label5", "label6"}, {"label7", "label8"}}})
 		if len(results) != 1000 {
 			b.Errorf("expect 1000 got %v", len(results))
 		}

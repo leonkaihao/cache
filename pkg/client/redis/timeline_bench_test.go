@@ -227,7 +227,7 @@ func BenchmarkRedisTimeline_GetUpdatedKeys_vs_KeysGetLatest(b *testing.B) {
 	b.Run("Keys+GetLatest", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			keys, _ := tl.Keys(ctx)
+			keys, _ := tl.Keys(ctx, model.FilterOptions{})
 			// For each key, need to get latest timestamp to filter
 			// This is the inefficient approach GetUpdatedKeys avoids
 			for _, key := range keys {

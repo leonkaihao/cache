@@ -200,12 +200,12 @@ func (suite *TimelineTestSuite) TestManagementOperations(t *testing.T) {
 	_ = tl.Append(ctx, "key1", now, map[string]string{"f": "v"}, false)
 	_ = tl.Append(ctx, "key2", now, map[string]string{"f": "v"}, false)
 
-	keys, err := tl.Keys(ctx)
+	keys, err := tl.Keys(ctx, model.FilterOptions{})
 	require.NoError(t, err)
 	assert.Len(t, keys, 2)
 
 	_ = tl.Remove(ctx, []string{"key1"})
-	keys, err = tl.Keys(ctx)
+	keys, err = tl.Keys(ctx, model.FilterOptions{})
 	require.NoError(t, err)
 	assert.Len(t, keys, 1)
 }

@@ -148,16 +148,19 @@ func (bkt *bucket[T]) UpdateWithTs(ctx context.Context, key string, data any, ts
 	return doc, updated, nil
 }
 
-// Filter is a way of filtering data with labels
-// it can have multiple label filters
-// each filter is a string array, label is the item. all the labels inside a filter has OR logic
-// between filters are AND logic
-// i.e. Filter([]string{"foo", "bar"}, []string{"new", "bee"}) means data with label foo OR bar, AND new OR bee.
-func (bkt *bucket[T]) Filter(ctx context.Context, filterSteps ...[]string) ([]string, error) {
+// Keys returns all keys in the bucket, optionally filtered by labels.
+// Supports label-based filtering with OR within each slice and AND between slices.
+// Example:
+//   Keys(ctx, FilterOptions{}) - returns all keys
+//   Keys(ctx, FilterOptions{LabelFilter: {{"foo", "bar"}}}) - keys with label foo OR bar
+//   Keys(ctx, FilterOptions{LabelFilter: {{"foo"}, {"bar"}}}) - keys with label foo AND bar
+func (bkt *bucket[T]) Keys(ctx context.Context, opt model.FilterOptions) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, bkt.timeout)
 	defer cancel()
 
 	redisCli := bkt.cli.getRedisCli()
+
+	filterSteps := opt.LabelFilter
 
 	if len(filterSteps) == 0 {
 		result, err := redisCli.SMembers(ctx, formatBucketKeys(bkt)).Result()

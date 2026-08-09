@@ -24,6 +24,14 @@ type TimelineData interface {
 	// If force is true, overwrites existing fields.
 	Insert(ctx context.Context, key string, ts time.Time, data map[string]string, force bool) error
 
+	// Keys returns all logical keys in the timeline, optionally filtered by labels.
+	// Uses indexed lookups - O(matching_keys). Fast even with millions of keys.
+	// Empty FilterOptions returns all keys.
+	// Labels within a single []string are OR'd together.
+	// Multiple []string arrays are AND'd:
+	//   FilterOptions{LabelFilter: {{"a","b"}, {"c"}}} returns keys with (a OR b) AND c.
+	Keys(ctx context.Context, opt FilterOptions) ([]string, error)
+
 	// GetAt returns the complete merged state at or before ts for each key.
 	// Results are parallel to keys: results[i] corresponds to keys[i].
 	// nil at results[i] means keys[i] has no state at or before ts (not an error).
@@ -77,13 +85,6 @@ type TimelineData interface {
 
 // TimelineLabels provides label management for timeline keys.
 type TimelineLabels interface {
-	// Keys returns all logical keys in the timeline.
-	// With no label filter arguments, all keys are returned.
-	// Labels within a single []string argument are OR'd together.
-	// Multiple arguments are AND'd: Keys(ctx, []string{"a","b"}, []string{"c"})
-	// returns keys that have (a OR b) AND c.
-	Keys(ctx context.Context, labelFilters ...[]string) ([]string, error)
-
 	// AddKeyLabels associates labels with a logical key.
 	// Empty strings in labels are ignored. Adding an existing label is a no-op.
 	AddKeyLabels(ctx context.Context, key string, labels []string) error

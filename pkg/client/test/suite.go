@@ -97,22 +97,22 @@ func (s *TestSuite) TestLabels(t *testing.T) {
 	require.NoError(t, doc3.AddLabels(ctx, []string{"bar"}))
 
 	// Filter by single label
-	keys, err := bkt.Filter(ctx, []string{"foo"})
+	keys, err := bkt.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"foo"}}})
 	require.NoError(t, err)
 	assert.Len(t, keys, 2) // doc1, doc2
 
-	keys, err = bkt.Filter(ctx, []string{"bar"})
+	keys, err = bkt.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"bar"}}})
 	require.NoError(t, err)
 	assert.Len(t, keys, 2) // doc1, doc3
 
 	// Filter by multiple labels (AND logic)
-	keys, err = bkt.Filter(ctx, []string{"foo"}, []string{"bar"})
+	keys, err = bkt.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"foo"}, {"bar"}}})
 	require.NoError(t, err)
 	assert.Len(t, keys, 1) // doc1
 
 	// Remove labels
 	require.NoError(t, doc1.RemoveLabels(ctx, []string{"foo"}))
-	keys, err = bkt.Filter(ctx, []string{"foo"})
+	keys, err = bkt.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"foo"}}})
 	require.NoError(t, err)
 	assert.Len(t, keys, 1) // doc2
 
