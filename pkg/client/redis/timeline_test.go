@@ -458,17 +458,17 @@ func TestRedisTimeline_KeysWithLabelFilter(t *testing.T) {
 	require.NoError(t, tl.AddKeyLabels(ctx, "k3", []string{"foo", "bee"}))
 
 	// No filter — all keys
-	keys, err := tl.Keys(ctx)
+	keys, err := tl.Keys(ctx, model.FilterOptions{})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"k1", "k2", "k3"}, keys)
 
 	// Single label
-	keys, err = tl.Keys(ctx, []string{"foo"})
+	keys, err = tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"foo"}}})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"k1", "k3"}, keys)
 
 	// AND across two steps
-	keys, err = tl.Keys(ctx, []string{"foo", "bar"}, []string{"new"})
+	keys, err = tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"foo", "bar"}, {"new"}}})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"k1", "k2"}, keys)
 }
@@ -490,7 +490,7 @@ func TestRedisTimeline_LabelCleanupOnRemove(t *testing.T) {
 
 	require.NoError(t, tl.Remove(ctx, []string{"k1"}))
 
-	keys, err := tl.Keys(ctx, []string{"alpha"})
+	keys, err := tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"alpha"}}})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"k2"}, keys)
 }
