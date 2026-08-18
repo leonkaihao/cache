@@ -3,6 +3,7 @@ module github.com/leonkaihao/cache/v2
 go 1.20
 
 require (
+	github.com/huandu/skiplist v1.2.1
 	github.com/redis/go-redis/v9 v9.6.1
 	github.com/stretchr/testify v1.10.0
 	go.uber.org/zap v1.13.0

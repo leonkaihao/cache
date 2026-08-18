@@ -97,6 +97,7 @@ jobs:
         --key '${{ secrets.BENCHER_API_KEY }}' \
         --branch main \
         --testbed ubuntu-latest \
+        ${{ github.event_name == 'pull_request' && format('--ci-number {0}', github.event.number) || '' }} \
         --threshold-measure latency \
         --threshold-test t_test \
         --threshold-max-sample-size 64 \
@@ -113,6 +114,7 @@ jobs:
         --key '${{ secrets.BENCHER_API_KEY }}' \
         --branch main \
         --testbed ubuntu-latest \
+        ${{ github.event_name == 'pull_request' && format('--ci-number {0}', github.event.number) || '' }} \
         --threshold-measure latency \
         --threshold-test t_test \
         --threshold-max-sample-size 64 \

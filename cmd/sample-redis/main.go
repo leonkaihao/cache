@@ -264,22 +264,22 @@ func timelineOperations(ctx context.Context, cli model.CacheClient) error {
 	}
 
 	// Query current state (merged from all updates)
-	latestStates, err := timeline.GetLatest(ctx, []string{"device_A"})
+	latestStates, err := timeline.GetLatest(ctx, []string{"device_A"}, model.QueryOptions{})
 	if err != nil {
 		return err
 	}
 	state := latestStates[0]
 	log.Printf("Latest state: zones=%s, beacons=%s, battery=%s\n",
-		state["zones"], state["beacons"], state["battery"])
+		state["zones"].Value, state["beacons"].Value, state["battery"].Value)
 
 	// Query historical state
-	historicalStates, err := timeline.GetAt(ctx, []string{"device_A"}, now.Add(7*time.Minute))
+	historicalStates, err := timeline.GetAt(ctx, []string{"device_A"}, now.Add(7*time.Minute), model.QueryOptions{})
 	if err != nil {
 		return err
 	}
 	historicalState := historicalStates[0]
 	log.Printf("State at +7min: zones=%s, beacons=%s, battery=%s\n",
-		historicalState["zones"], historicalState["beacons"], historicalState["battery"])
+		historicalState["zones"].Value, historicalState["beacons"].Value, historicalState["battery"].Value)
 
 	// List all keys in timeline
 	keys, err := timeline.Keys(ctx, model.FilterOptions{})
