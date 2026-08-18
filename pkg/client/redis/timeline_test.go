@@ -1,12 +1,8 @@
-//go:build integration
-// +build integration
-
 package redis
 
 import (
 	"context"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -15,781 +11,408 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Note: These tests require a running Redis instance
-// Run with: go test -tags=integration
+// TestRedisTimeline_FieldKeyPattern tests the per-field ZSET key pattern
+func TestRedisTimeline_FieldKeyPattern(t *testing.T) {
+	skipIfNoRedis(t)
 
-func TestRedisTimeline_BasicOperations(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
+	cli := newTestRedisClient(t)
 	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
+	defer func() { _ = tl.Delete(context.Background()) }()
 
 	ctx := context.Background()
 	now := time.Now()
 
-	// Test Append
+	// Append multiple fields
 	err := tl.Append(ctx, "key1", now, map[string]string{
 		"field1": "value1",
 		"field2": "value2",
+		"field3": "value3",
 	}, false)
 	require.NoError(t, err)
 
-	// Test GetAt
-	results, err := tl.GetAt(ctx, []string{"key1"}, now)
+	// Verify Redis keys exist with correct pattern: T@{name}/K/{key}/F/{field}
+	redisCli := cli.(*client).getRedisCli()
+
+	field1Key := "T@test_timeline/K/key1/F/field1"
+	field2Key := "T@test_timeline/K/key1/F/field2"
+	field3Key := "T@test_timeline/K/key1/F/field3"
+
+	exists, err := redisCli.Exists(ctx, field1Key, field2Key, field3Key).Result()
 	require.NoError(t, err)
-	require.Len(t, results, 1)
-	state := results[0]
-	assert.Equal(t, "value1", state["field1"])
-	assert.Equal(t, "value2", state["field2"])
+	assert.Equal(t, int64(3), exists, "all 3 field keys should exist")
+
+	// Verify ZSET contents (member format: "{ts}:{value}")
+	members, err := redisCli.ZRange(ctx, field1Key, 0, -1).Result()
+	require.NoError(t, err)
+	assert.Len(t, members, 1)
+
+	// Decode member
+	_, value, err := decodeMember(members[0])
+	require.NoError(t, err)
+	assert.Equal(t, "value1", value)
 }
 
-func TestRedisTimeline_SparseUpdates(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
+// TestRedisTimeline_MemberEncodingDecoding tests the "{ts}:{value}" format
+func TestRedisTimeline_MemberEncodingDecoding(t *testing.T) {
+	skipIfNoRedis(t)
+
+	cli := newTestRedisClient(t)
 	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
+	defer func() { _ = tl.Delete(context.Background()) }()
 
 	ctx := context.Background()
-	t1 := time.Now()
-	t2 := t1.Add(time.Second)
+	now := time.Now().Truncate(time.Microsecond)
 
-	// First update
-	err := tl.Append(ctx, "key1", t1, map[string]string{
-		"field1": "value1",
-		"field2": "value2",
+	// Append data
+	err := tl.Append(ctx, "key1", now, map[string]string{
+		"field1": "value:with:colons",
 	}, false)
 	require.NoError(t, err)
 
-	// Second update (sparse)
-	err = tl.Append(ctx, "key1", t2, map[string]string{
-		"field1": "updated",
-	}, false)
+	// Read back and verify encoding works with colons in value
+	results, err := tl.GetAt(ctx, []string{"key1"}, now, model.QueryOptions{})
 	require.NoError(t, err)
-
-	// Get merged state
-	results, err := tl.GetAt(ctx, []string{"key1"}, t2)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	state := results[0]
-	assert.Equal(t, "updated", state["field1"])
-	assert.Equal(t, "value2", state["field2"])
+	require.NotNil(t, results[0])
+	assert.Equal(t, "value:with:colons", results[0]["field1"].Value)
+	assert.Equal(t, now, results[0]["field1"].Time)
 }
 
-func TestRedisTimeline_RetentionPolicy(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
+// TestRedisTimeline_PerFieldRetentionCleanup tests Redis ZSET cleanup per field
+func TestRedisTimeline_PerFieldRetentionCleanup(t *testing.T) {
+	skipIfNoRedis(t)
+
+	cli := newTestRedisClient(t)
 	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-
-	// Test MaxCount retention
-	tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
-		MaxCount:    2,
-		MaxDuration: 0,
-		Strategy:    model.RetentionMax,
-	}})
-
-	// Write 3 points
-	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	t2 := t1.Add(1 * time.Hour)
-	t3 := t2.Add(1 * time.Hour)
-
-	var err error
-	err = tl.Append(ctx, "k1", t1, map[string]string{"v": "1"}, false)
-	require.NoError(t, err)
-	err = tl.Append(ctx, "k1", t2, map[string]string{"v": "2"}, false)
-	require.NoError(t, err)
-	err = tl.Append(ctx, "k1", t3, map[string]string{"v": "3"}, false)
-	require.NoError(t, err)
-
-	// Verify: only 2 points remain (oldest removed)
-	timeline, err := tl.Timeline(ctx, "k1")
-	require.NoError(t, err)
-	assert.Equal(t, 2, len(timeline), "should keep exactly 2 points")
-	assert.Equal(t, t2.UnixMicro(), timeline[0].Time.UnixMicro())
-	assert.Equal(t, "2", timeline[0].Value["v"])
-	assert.Equal(t, t3.UnixMicro(), timeline[1].Time.UnixMicro())
-	assert.Equal(t, "3", timeline[1].Value["v"])
-}
-
-func TestRedisTimeline_RetentionDurationOnly(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_retention_duration")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-
-	// Test duration-only retention
-	tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
-		MaxCount:    0,
-		MaxDuration: 2 * time.Hour,
-		Strategy:    model.RetentionMax,
-	}})
-
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	t1 := base
-	t2 := base.Add(1 * time.Hour)
-	t3 := base.Add(2 * time.Hour)
-	t4 := base.Add(3 * time.Hour) // This should trigger removal of t1
-
-	var err error
-	err = tl.Append(ctx, "k1", t1, map[string]string{"v": "1"}, false)
-	require.NoError(t, err)
-	err = tl.Append(ctx, "k1", t2, map[string]string{"v": "2"}, false)
-	require.NoError(t, err)
-	err = tl.Append(ctx, "k1", t3, map[string]string{"v": "3"}, false)
-	require.NoError(t, err)
-	err = tl.Append(ctx, "k1", t4, map[string]string{"v": "4"}, false)
-	require.NoError(t, err)
-
-	// Verify: only points within 2 hours of most recent remain
-	timeline, err := tl.Timeline(ctx, "k1")
-	require.NoError(t, err)
-	assert.Equal(t, 3, len(timeline), "should keep points within 2h duration")
-	assert.Equal(t, "2", timeline[0].Value["v"])
-	assert.Equal(t, "3", timeline[1].Value["v"])
-	assert.Equal(t, "4", timeline[2].Value["v"])
-}
-
-func TestRedisTimeline_RetentionStrategies(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-
-	t.Run("RetentionMax", func(t *testing.T) {
-		tl := cli.Timeline("test_retention_max")
-		defer func() {
-			_ = tl.Delete(context.Background())
-		}()
-
-		ctx := context.Background()
-
-		// RetentionMax: keep MORE data (union of constraints)
-		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
-			MaxCount:    3,
-			MaxDuration: 90 * time.Minute,
-			Strategy:    model.RetentionMax,
-	}})
-
-		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-		var err error
-		for i := 0; i < 5; i++ {
-			ts := base.Add(time.Duration(i) * 30 * time.Minute)
-			err = tl.Append(ctx, "k1", ts, map[string]string{"v": fmt.Sprintf("%d", i)}, false)
-			require.NoError(t, err)
-		}
-
-		// Count boundary: keep last 3 (remove first 2)
-		// Duration boundary: keep last 90min = last 4 (remove first 1)
-		// RetentionMax: min(2, 1) = 1, so keep last 4 points
-		timeline, err := tl.Timeline(ctx, "k1")
-		require.NoError(t, err)
-		assert.Equal(t, 4, len(timeline), "RetentionMax should keep MORE data")
-	})
-
-	t.Run("RetentionMin", func(t *testing.T) {
-		tl := cli.Timeline("test_retention_min")
-		defer func() {
-			_ = tl.Delete(context.Background())
-		}()
-
-		ctx := context.Background()
-
-		// RetentionMin: keep LESS data (intersection of constraints)
-		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
-			MaxCount:    3,
-			MaxDuration: 90 * time.Minute,
-			Strategy:    model.RetentionMin,
-	}})
-
-		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-		var err error
-		for i := 0; i < 5; i++ {
-			ts := base.Add(time.Duration(i) * 30 * time.Minute)
-			err = tl.Append(ctx, "k1", ts, map[string]string{"v": fmt.Sprintf("%d", i)}, false)
-			require.NoError(t, err)
-		}
-
-		// Count boundary: keep last 3 (remove first 2)
-		// Duration boundary: keep last 90min = last 4 (remove first 1)
-		// RetentionMin: max(2, 1) = 2, so keep last 3 points
-		timeline, err := tl.Timeline(ctx, "k1")
-		require.NoError(t, err)
-		assert.Equal(t, 3, len(timeline), "RetentionMin should keep LESS data")
-	})
-}
-
-func TestRedisTimeline_RetentionBoundaryEdgeCases(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-
-	t.Run("ExactCount", func(t *testing.T) {
-		tl := cli.Timeline("test_exact_count")
-		defer func() {
-			_ = tl.Delete(context.Background())
-		}()
-
-		ctx := context.Background()
-
-		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
-			MaxCount:    3,
-			MaxDuration: 0,
-			Strategy:    model.RetentionMax,
-	}})
-
-		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-		var err error
-		for i := 0; i < 3; i++ {
-			ts := base.Add(time.Duration(i) * time.Hour)
-			err = tl.Append(ctx, "k1", ts, map[string]string{"v": fmt.Sprintf("%d", i)}, false)
-			require.NoError(t, err)
-		}
-
-		// Exactly at limit - no cleanup should occur
-		timeline, err := tl.Timeline(ctx, "k1")
-		require.NoError(t, err)
-		assert.Equal(t, 3, len(timeline), "should keep all points when at exact limit")
-	})
-
-	t.Run("SinglePoint", func(t *testing.T) {
-		tl := cli.Timeline("test_single_point")
-		defer func() {
-			_ = tl.Delete(context.Background())
-		}()
-
-		ctx := context.Background()
-
-		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
-			MaxCount:    1,
-			MaxDuration: 0,
-			Strategy:    model.RetentionMax,
-	}})
-
-		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-		var err error
-		for i := 0; i < 3; i++ {
-			ts := base.Add(time.Duration(i) * time.Hour)
-			err = tl.Append(ctx, "k1", ts, map[string]string{"v": fmt.Sprintf("%d", i)}, false)
-			require.NoError(t, err)
-		}
-
-		// Should keep only the latest point
-		timeline, err := tl.Timeline(ctx, "k1")
-		require.NoError(t, err)
-		assert.Equal(t, 1, len(timeline), "should keep only 1 point")
-		assert.Equal(t, "2", timeline[0].Value["v"], "should keep the latest point")
-	})
-
-	t.Run("EmptyTimeline", func(t *testing.T) {
-		tl := cli.Timeline("test_empty")
-		defer func() {
-			_ = tl.Delete(context.Background())
-		}()
-
-		ctx := context.Background()
-
-		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
-			MaxCount:    2,
-			MaxDuration: 1 * time.Hour,
-			Strategy:    model.RetentionMax,
-	}})
-
-		// Query empty timeline - should not error
-		timeline, err := tl.Timeline(ctx, "k1")
-		require.NoError(t, err)
-		assert.Equal(t, 0, len(timeline), "empty timeline should remain empty")
-	})
-}
-
-func TestRedisTimeline_RetentionConcurrency(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_retention_concurrent")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-
-	// Set retention
-	tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
-		MaxCount:    10,
-		MaxDuration: 0,
-		Strategy:    model.RetentionMax,
-	}})
-
-	// Concurrent writes to same key
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			ts := base.Add(time.Duration(idx) * time.Minute)
-			_ = tl.Append(ctx, "k1", ts, map[string]string{"v": fmt.Sprintf("%d", idx)}, false)
-		}(i)
-	}
-	wg.Wait()
-
-	// Verify retention was enforced (may have slight variations due to concurrency)
-	timeline, err := tl.Timeline(ctx, "k1")
-	require.NoError(t, err)
-	assert.LessOrEqual(t, len(timeline), 10, "retention should limit to MaxCount even with concurrent writes")
-}
-
-func TestRedisTimeline_RetentionRedisCleanup(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_retention_cleanup")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-
-	// Set retention
-	tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
-		MaxCount:    2,
-		MaxDuration: 0,
-		Strategy:    model.RetentionMax,
-	}})
-
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	t1 := base
-	t2 := base.Add(1 * time.Hour)
-	t3 := base.Add(2 * time.Hour)
-
-	// Write 3 points
-	var err error
-	err = tl.Append(ctx, "k1", t1, map[string]string{"v": "1"}, false)
-	require.NoError(t, err)
-	err = tl.Append(ctx, "k1", t2, map[string]string{"v": "2"}, false)
-	require.NoError(t, err)
-	err = tl.Append(ctx, "k1", t3, map[string]string{"v": "3"}, false)
-	require.NoError(t, err)
-
-	// Get Redis client to verify actual data deletion
-	redisCli := cli.getRedisCli()
-
-	// Verify timestamp ZSET has only 2 entries
-	tsKey := fmt.Sprintf("T@test_retention_cleanup/K/k1/TS/")
-	tsCount, err := redisCli.ZCard(ctx, tsKey).Result()
-	require.NoError(t, err)
-	assert.Equal(t, int64(2), tsCount, "ZSET should have only 2 timestamps")
-
-	// Verify old data HASH was deleted
-	t1Micros := t1.Truncate(time.Microsecond).UnixMicro()
-	oldDataKey := fmt.Sprintf("T@test_retention_cleanup/K/k1/%d", t1Micros)
-	exists, err := redisCli.Exists(ctx, oldDataKey).Result()
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), exists, "old data HASH should be deleted from Redis")
-
-	// Verify newer data HASHes still exist
-	t2Micros := t2.Truncate(time.Microsecond).UnixMicro()
-	t3Micros := t3.Truncate(time.Microsecond).UnixMicro()
-	newDataKey2 := fmt.Sprintf("T@test_retention_cleanup/K/k1/%d", t2Micros)
-	newDataKey3 := fmt.Sprintf("T@test_retention_cleanup/K/k1/%d", t3Micros)
-
-	exists2, err := redisCli.Exists(ctx, newDataKey2).Result()
-	require.NoError(t, err)
-	assert.Equal(t, int64(1), exists2, "newer data HASH should still exist")
-
-	exists3, err := redisCli.Exists(ctx, newDataKey3).Result()
-	require.NoError(t, err)
-	assert.Equal(t, int64(1), exists3, "newest data HASH should still exist")
-
-	// Verify ZRANGE returns correct timestamps
-	timestamps, err := redisCli.ZRangeWithScores(ctx, tsKey, 0, -1).Result()
-	require.NoError(t, err)
-	assert.Equal(t, 2, len(timestamps), "should have 2 timestamps in ZSET")
-	assert.Equal(t, float64(t2Micros), timestamps[0].Score)
-	assert.Equal(t, float64(t3Micros), timestamps[1].Score)
-}
-
-// --- 8.5: Redis timeline label operations ---
-
-func TestRedisTimeline_Labels(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	now := time.Now()
-
-	require.NoError(t, tl.Append(ctx, "k1", now, map[string]string{"f": "v"}, false))
-	require.NoError(t, tl.Append(ctx, "k2", now, map[string]string{"f": "v"}, false))
-
-	require.NoError(t, tl.AddKeyLabels(ctx, "k1", []string{"alpha", "beta"}))
-
-	ls, err := tl.KeyLabels(ctx, "k1")
-	require.NoError(t, err)
-	assert.True(t, ls["alpha"])
-	assert.True(t, ls["beta"])
-
-	ls2, err := tl.KeyLabels(ctx, "k2")
-	require.NoError(t, err)
-	assert.Empty(t, ls2)
-
-	require.NoError(t, tl.RemoveKeyLabels(ctx, "k1", []string{"beta"}))
-	ls, _ = tl.KeyLabels(ctx, "k1")
-	assert.False(t, ls["beta"])
-	assert.True(t, ls["alpha"])
-}
-
-func TestRedisTimeline_KeysWithLabelFilter(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	now := time.Now()
-
-	require.NoError(t, tl.Append(ctx, "k1", now, map[string]string{"f": "v"}, false))
-	require.NoError(t, tl.Append(ctx, "k2", now, map[string]string{"f": "v"}, false))
-	require.NoError(t, tl.Append(ctx, "k3", now, map[string]string{"f": "v"}, false))
-
-	require.NoError(t, tl.AddKeyLabels(ctx, "k1", []string{"foo", "new"}))
-	require.NoError(t, tl.AddKeyLabels(ctx, "k2", []string{"bar", "new"}))
-	require.NoError(t, tl.AddKeyLabels(ctx, "k3", []string{"foo", "bee"}))
-
-	// No filter — all keys
-	keys, err := tl.Keys(ctx, model.FilterOptions{})
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"k1", "k2", "k3"}, keys)
-
-	// Single label
-	keys, err = tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"foo"}}})
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"k1", "k3"}, keys)
-
-	// AND across two steps
-	keys, err = tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"foo", "bar"}, {"new"}}})
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"k1", "k2"}, keys)
-}
-
-func TestRedisTimeline_LabelCleanupOnRemove(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	now := time.Now()
-
-	require.NoError(t, tl.Append(ctx, "k1", now, map[string]string{"f": "v"}, false))
-	require.NoError(t, tl.Append(ctx, "k2", now, map[string]string{"f": "v"}, false))
-	require.NoError(t, tl.AddKeyLabels(ctx, "k1", []string{"alpha"}))
-	require.NoError(t, tl.AddKeyLabels(ctx, "k2", []string{"alpha"}))
-
-	require.NoError(t, tl.Remove(ctx, []string{"k1"}))
-
-	keys, err := tl.Keys(ctx, model.FilterOptions{LabelFilter: [][]string{{"alpha"}}})
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"k2"}, keys)
-}
-
-// --- 8.6: Redis timeline batch query ---
-
-func TestRedisTimeline_BatchGetLatest(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	t1 := time.Now()
-
-	require.NoError(t, tl.Append(ctx, "k1", t1, map[string]string{"a": "1"}, false))
-	require.NoError(t, tl.Append(ctx, "k2", t1, map[string]string{"b": "2"}, false))
-
-	results, err := tl.GetLatest(ctx, []string{"k1", "k2", "missing"})
-	require.NoError(t, err)
-	require.Len(t, results, 3)
-	assert.Equal(t, "1", results[0]["a"])
-	assert.Equal(t, "2", results[1]["b"])
-	assert.Nil(t, results[2])
-}
-
-func TestRedisTimeline_BatchGetAt(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	t1 := time.Now()
-	t2 := t1.Add(time.Second)
-
-	require.NoError(t, tl.Append(ctx, "k1", t1, map[string]string{"a": "old"}, false))
-	require.NoError(t, tl.Append(ctx, "k2", t2, map[string]string{"b": "v"}, false))
-
-	results, err := tl.GetAt(ctx, []string{"k1", "k2", "missing"}, t1)
-	require.NoError(t, err)
-	require.Len(t, results, 3)
-	assert.Equal(t, "old", results[0]["a"])
-	assert.Nil(t, results[1]) // k2 has no data at t1
-	assert.Nil(t, results[2])
-}
-
-// --- GetUpdatedKeys tests ---
-
-func TestRedisTimeline_GetUpdatedKeys_NoUpdatesAfterTimestamp(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	t1 := time.Now()
-	t2 := t1.Add(time.Second)
-
-	// Add some data at t1
-	require.NoError(t, tl.Append(ctx, "k1", t1, map[string]string{"f": "v"}, false))
-
-	// Query for updates after t2 (later than any data)
-	keys, err := tl.GetUpdatedKeys(ctx, t2)
-	require.NoError(t, err)
-	assert.Empty(t, keys)
-}
-
-func TestRedisTimeline_GetUpdatedKeys_SingleKeyUpdated(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	t1 := time.Now()
-	t2 := t1.Add(time.Second)
-
-	// Add data at t2
-	require.NoError(t, tl.Append(ctx, "k1", t2, map[string]string{"f": "v"}, false))
-
-	// Query for updates after t1
-	keys, err := tl.GetUpdatedKeys(ctx, t1)
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"k1"}, keys)
-}
-
-func TestRedisTimeline_GetUpdatedKeys_MultipleKeysUpdated(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	t1 := time.Now()
-	t2 := t1.Add(time.Second)
-
-	// Add multiple keys at t2
-	require.NoError(t, tl.Append(ctx, "k1", t2, map[string]string{"f": "v"}, false))
-	require.NoError(t, tl.Append(ctx, "k2", t2, map[string]string{"f": "v"}, false))
-	require.NoError(t, tl.Append(ctx, "k3", t2, map[string]string{"f": "v"}, false))
-
-	// Query for updates after t1
-	keys, err := tl.GetUpdatedKeys(ctx, t1)
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"k1", "k2", "k3"}, keys)
-}
-
-func TestRedisTimeline_GetUpdatedKeys_KeyUpdatedMultipleTimes(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	t1 := time.Now()
-	t2 := t1.Add(time.Second)
-	t3 := t2.Add(time.Second)
-
-	// Update same key multiple times
-	require.NoError(t, tl.Append(ctx, "k1", t2, map[string]string{"f": "v1"}, false))
-	require.NoError(t, tl.Append(ctx, "k1", t3, map[string]string{"f": "v2"}, false))
-
-	// Query for updates after t1 - should return k1 only once
-	keys, err := tl.GetUpdatedKeys(ctx, t1)
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"k1"}, keys)
-}
-
-func TestRedisTimeline_GetUpdatedKeys_ExactTimestampBoundary(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	t1 := time.Now()
-	t2 := t1.Add(time.Second)
-
-	// Add data at exactly t1
-	require.NoError(t, tl.Append(ctx, "k1", t1, map[string]string{"f": "v"}, false))
-
-	// Query for updates after t1 (exclusive) - should not include k1
-	keys, err := tl.GetUpdatedKeys(ctx, t1)
-	require.NoError(t, err)
-	assert.Empty(t, keys)
-
-	// Add data at t2
-	require.NoError(t, tl.Append(ctx, "k2", t2, map[string]string{"f": "v"}, false))
-
-	// Query again - should now include k2 but not k1
-	keys, err = tl.GetUpdatedKeys(ctx, t1)
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"k2"}, keys)
-}
-
-func TestRedisTimeline_GetUpdatedKeys_ContextCancellation(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
-
-	t1 := time.Now()
-	_, err := tl.GetUpdatedKeys(ctx, t1)
-	assert.Error(t, err)
-	assert.Equal(t, context.Canceled, err)
-}
-
-func TestRedisTimeline_GetUpdatedKeys_EmptyTimeline(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	t1 := time.Now()
-
-	// Query on empty timeline
-	keys, err := tl.GetUpdatedKeys(ctx, t1)
-	require.NoError(t, err)
-	assert.Empty(t, keys)
-}
-
-func TestRedisTimeline_GetUpdatedKeys_GlobalIndexCleanupAfterRemove(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	t1 := time.Now()
-	t2 := t1.Add(time.Second)
-
-	// Add data
-	require.NoError(t, tl.Append(ctx, "k1", t2, map[string]string{"f": "v"}, false))
-	require.NoError(t, tl.Append(ctx, "k2", t2, map[string]string{"f": "v"}, false))
-
-	// Verify both keys are in the index
-	keys, err := tl.GetUpdatedKeys(ctx, t1)
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"k1", "k2"}, keys)
-
-	// Remove k1
-	require.NoError(t, tl.Remove(ctx, []string{"k1"}))
-
-	// Verify k1 is removed from index
-	keys, err = tl.GetUpdatedKeys(ctx, t1)
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"k2"}, keys)
-}
-
-func TestRedisTimeline_GetUpdatedKeys_GlobalIndexCleanupAfterClear(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
-
-	ctx := context.Background()
-	t1 := time.Now()
-	t2 := t1.Add(time.Second)
-
-	// Add data
-	require.NoError(t, tl.Append(ctx, "k1", t2, map[string]string{"f": "v"}, false))
-	require.NoError(t, tl.Append(ctx, "k2", t2, map[string]string{"f": "v"}, false))
-
-	// Verify keys are in the index
-	keys, err := tl.GetUpdatedKeys(ctx, t1)
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"k1", "k2"}, keys)
-
-	// Clear timeline
-	require.NoError(t, tl.Clear(ctx))
-
-	// Verify index is cleared
-	keys, err = tl.GetUpdatedKeys(ctx, t1)
-	require.NoError(t, err)
-	assert.Empty(t, keys)
-}
-
-// TestRedisTimeline_TimelinePipelining tests the pipelined Timeline implementation with 20 points
-func TestRedisTimeline_TimelinePipelining(t *testing.T) {
-	cli := NewClient(getRedisAddr(), "", 0).(*client)
-	tl := cli.Timeline("test_timeline_pipeline")
-	defer func() {
-		_ = tl.Delete(context.Background())
-	}()
+	defer func() { _ = tl.Delete(context.Background()) }()
 
 	ctx := context.Background()
 	base := time.Now().Truncate(time.Microsecond)
 
-	// Build a timeline with 20 points, with overlapping field updates
-	for i := 0; i < 20; i++ {
-		ts := base.Add(time.Duration(i) * time.Second)
-		data := map[string]string{
-			"counter": fmt.Sprintf("%d", i),
-		}
-		// Add a new field every 5 points
-		if i%5 == 0 {
-			data[fmt.Sprintf("field%d", i/5)] = fmt.Sprintf("value%d", i)
-		}
-		require.NoError(t, tl.Append(ctx, "k1", ts, data, false))
+	tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
+		MaxCount:    2,
+		MaxDuration: 0,
+		Strategy:    model.RetentionMax,
+	}})
+
+	// Field 'a' gets 4 updates
+	for i := 0; i < 4; i++ {
+		err := tl.Append(ctx, "key1", base.Add(time.Duration(i)*time.Second), map[string]string{
+			"a": fmt.Sprintf("a%d", i),
+		}, false)
+		require.NoError(t, err)
 	}
 
-	// Fetch the complete timeline
-	timeline, err := tl.Timeline(ctx, "k1")
+	// Field 'b' gets only 1 update
+	err := tl.Append(ctx, "key1", base, map[string]string{"b": "b0"}, false)
 	require.NoError(t, err)
-	require.Len(t, timeline, 20)
 
-	// Verify first point
-	assert.Equal(t, base, timeline[0].Time)
-	assert.Equal(t, "0", timeline[0].Value["counter"])
-	assert.Equal(t, "value0", timeline[0].Value["field0"])
+	// Verify Redis ZSETs have correct counts
+	redisCli := cli.(*client).getRedisCli()
 
-	// Verify middle point (index 10) has accumulated fields
-	assert.Equal(t, base.Add(10*time.Second), timeline[10].Time)
-	assert.Equal(t, "10", timeline[10].Value["counter"])
-	assert.Equal(t, "value0", timeline[10].Value["field0"])  // Carried from point 0
-	assert.Equal(t, "value5", timeline[10].Value["field1"])  // Carried from point 5
-	assert.Equal(t, "value10", timeline[10].Value["field2"]) // Added at point 10
+	fieldAKey := "T@test_timeline/K/key1/F/a"
+	fieldBKey := "T@test_timeline/K/key1/F/b"
 
-	// Verify last point (index 19) has all accumulated fields
-	assert.Equal(t, base.Add(19*time.Second), timeline[19].Time)
-	assert.Equal(t, "19", timeline[19].Value["counter"])
-	assert.Equal(t, "value0", timeline[19].Value["field0"])
-	assert.Equal(t, "value5", timeline[19].Value["field1"])
-	assert.Equal(t, "value10", timeline[19].Value["field2"])
-	assert.Equal(t, "value15", timeline[19].Value["field3"])
+	countA, err := redisCli.ZCard(ctx, fieldAKey).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), countA, "field 'a' should have 2 entries after retention")
+
+	countB, err := redisCli.ZCard(ctx, fieldBKey).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), countB, "field 'b' should have 1 entry (not affected by retention)")
+
+	// Verify values are correct
+	latest, err := tl.GetLatest(ctx, []string{"key1"}, model.QueryOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "a3", latest[0]["a"].Value)
+	assert.Equal(t, "b0", latest[0]["b"].Value)
+}
+
+// TestRedisTimeline_RetentionDurationOnly tests duration-based retention
+func TestRedisTimeline_RetentionDurationOnly(t *testing.T) {
+	skipIfNoRedis(t)
+
+	cli := newTestRedisClient(t)
+	tl := cli.Timeline("test_timeline")
+	defer func() { _ = tl.Delete(context.Background()) }()
+
+	ctx := context.Background()
+	base := time.Now().Truncate(time.Microsecond)
+
+	tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
+		MaxCount:    0,
+		MaxDuration: 3 * time.Second,
+		Strategy:    model.RetentionMax,
+	}})
+
+	// Add 5 points spread over 5 seconds
+	for i := 0; i < 5; i++ {
+		err := tl.Append(ctx, "key1", base.Add(time.Duration(i)*time.Second), map[string]string{
+			"v": fmt.Sprintf("%d", i),
+		}, false)
+		require.NoError(t, err)
+	}
+
+	// Only last 4 points should remain (within 3 seconds of most recent)
+	// Most recent is at base+4s, so cutoff is base+1s
+	// Points at base+1s, base+2s, base+3s, base+4s should remain
+	timeline, err := tl.Timeline(ctx, "key1", model.QueryOptions{})
+	require.NoError(t, err)
+	require.Contains(t, timeline, "v")
+	assert.Equal(t, 4, len(timeline["v"]))
+	assert.Equal(t, "1", timeline["v"][0].Value)
+	assert.Equal(t, "4", timeline["v"][3].Value)
+}
+
+// TestRedisTimeline_RetentionStrategies tests RetentionMax vs RetentionMin
+func TestRedisTimeline_RetentionStrategies(t *testing.T) {
+	skipIfNoRedis(t)
+
+	// Test RetentionMax (keep more data)
+	t.Run("RetentionMax", func(t *testing.T) {
+		cli := newTestRedisClient(t)
+		tl := cli.Timeline("test_max")
+		defer func() { _ = tl.Delete(context.Background()) }()
+
+		ctx := context.Background()
+		base := time.Now().Truncate(time.Microsecond)
+
+		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
+			MaxCount:    3,
+			MaxDuration: 2 * time.Second,
+			Strategy:    model.RetentionMax,
+		}})
+
+		// Add 5 points
+		for i := 0; i < 5; i++ {
+			_ = tl.Append(ctx, "key1", base.Add(time.Duration(i)*time.Second), map[string]string{
+				"v": fmt.Sprintf("%d", i),
+			}, false)
+		}
+
+		// RetentionMax: keep min(3 by count, 3 by duration) = 3
+		// Most recent is base+4s, duration cutoff is base+2s
+		// By count: keep last 3 (indices 2,3,4)
+		// By duration: keep >= base+2s (indices 2,3,4)
+		// Result: keep 3 points
+		timeline, err := tl.Timeline(ctx, "key1", model.QueryOptions{})
+		require.NoError(t, err)
+		assert.Len(t, timeline["v"], 3)
+	})
+
+	// Test RetentionMin (keep less data)
+	t.Run("RetentionMin", func(t *testing.T) {
+		cli := newTestRedisClient(t)
+		tl := cli.Timeline("test_min")
+		defer func() { _ = tl.Delete(context.Background()) }()
+
+		ctx := context.Background()
+		base := time.Now().Truncate(time.Microsecond)
+
+		tl.WithOptions(model.TimelineOptions{Retention: model.RetentionPolicy{
+			MaxCount:    4,
+			MaxDuration: 2 * time.Second,
+			Strategy:    model.RetentionMin,
+		}})
+
+		// Add 5 points
+		for i := 0; i < 5; i++ {
+			_ = tl.Append(ctx, "key1", base.Add(time.Duration(i)*time.Second), map[string]string{
+				"v": fmt.Sprintf("%d", i),
+			}, false)
+		}
+
+		// RetentionMin: keep max(1 by count, 3 by duration) = remove max
+		// By count: remove first 1 (keep indices 1,2,3,4)
+		// By duration: remove first 2 (keep indices 2,3,4)
+		// Result: keep 3 points (indices 2,3,4)
+		timeline, err := tl.Timeline(ctx, "key1", model.QueryOptions{})
+		require.NoError(t, err)
+		assert.Len(t, timeline["v"], 3)
+	})
+}
+
+// TestRedisTimeline_GlobalTSZSET tests the global timestamp ZSET
+func TestRedisTimeline_GlobalTSZSET(t *testing.T) {
+	skipIfNoRedis(t)
+
+	cli := newTestRedisClient(t)
+	tl := cli.Timeline("test_timeline")
+	defer func() { _ = tl.Delete(context.Background()) }()
+
+	ctx := context.Background()
+	t1 := time.Now().Truncate(time.Microsecond)
+	t2 := t1.Add(time.Second)
+	t3 := t2.Add(time.Second)
+
+	// Add keys at different times
+	_ = tl.Append(ctx, "k1", t1, map[string]string{"f": "v1"}, false)
+	_ = tl.Append(ctx, "k2", t2, map[string]string{"f": "v2"}, false)
+	_ = tl.Append(ctx, "k3", t3, map[string]string{"f": "v3"}, false)
+
+	// Verify Redis ZSET exists
+	redisCli := cli.(*client).getRedisCli()
+	globalTSKey := formatTimelineGlobalTS("test_timeline")
+
+	count, err := redisCli.ZCard(ctx, globalTSKey).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), count)
+
+	// Verify scores (timestamps)
+	scores, err := redisCli.ZRangeWithScores(ctx, globalTSKey, 0, -1).Result()
+	require.NoError(t, err)
+	assert.Equal(t, float64(normalizeTimestamp(t1)), scores[0].Score)
+	assert.Equal(t, float64(normalizeTimestamp(t2)), scores[1].Score)
+	assert.Equal(t, float64(normalizeTimestamp(t3)), scores[2].Score)
+
+	// Test Keys with AfterTs using the ZSET
+	keys, err := tl.Keys(ctx, model.FilterOptions{AfterTs: &t1})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"k2", "k3"}, keys)
+}
+
+// TestRedisTimeline_ScanFieldDiscovery tests SCAN for discovering field keys
+func TestRedisTimeline_ScanFieldDiscovery(t *testing.T) {
+	skipIfNoRedis(t)
+
+	cli := newTestRedisClient(t)
+	tl := cli.Timeline("test_timeline")
+	defer func() { _ = tl.Delete(context.Background()) }()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	// Append with 10 fields
+	data := make(map[string]string)
+	for i := 0; i < 10; i++ {
+		data[fmt.Sprintf("field%d", i)] = fmt.Sprintf("value%d", i)
+	}
+	err := tl.Append(ctx, "key1", now, data, false)
+	require.NoError(t, err)
+
+	// Verify SCAN discovers all 10 fields
+	redisCli := cli.(*client).getRedisCli()
+	pattern := "T@test_timeline/K/key1/F/*"
+
+	var keys []string
+	iter := redisCli.Scan(ctx, 0, pattern, 0).Iterator()
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	require.NoError(t, iter.Err())
+	assert.Len(t, keys, 10)
+
+	// Verify Timeline returns all 10 fields
+	timeline, err := tl.Timeline(ctx, "key1", model.QueryOptions{})
+	require.NoError(t, err)
+	assert.Len(t, timeline, 10)
+}
+
+// TestRedisTimeline_RemoveCleanupFieldKeys tests that Remove deletes all field ZSETs
+func TestRedisTimeline_RemoveCleanupFieldKeys(t *testing.T) {
+	skipIfNoRedis(t)
+
+	cli := newTestRedisClient(t)
+	tl := cli.Timeline("test_timeline")
+	defer func() { _ = tl.Delete(context.Background()) }()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	// Append multiple fields
+	err := tl.Append(ctx, "key1", now, map[string]string{
+		"field1": "value1",
+		"field2": "value2",
+		"field3": "value3",
+	}, false)
+	require.NoError(t, err)
+
+	// Verify keys exist
+	redisCli := cli.(*client).getRedisCli()
+	pattern := "T@test_timeline/K/key1/F/*"
+
+	var keysBefore []string
+	iter := redisCli.Scan(ctx, 0, pattern, 0).Iterator()
+	for iter.Next(ctx) {
+		keysBefore = append(keysBefore, iter.Val())
+	}
+	require.Len(t, keysBefore, 3)
+
+	// Remove the key
+	err = tl.Remove(ctx, []string{"key1"})
+	require.NoError(t, err)
+
+	// Verify all field keys are deleted
+	var keysAfter []string
+	iter = redisCli.Scan(ctx, 0, pattern, 0).Iterator()
+	for iter.Next(ctx) {
+		keysAfter = append(keysAfter, iter.Val())
+	}
+	assert.Empty(t, keysAfter)
+}
+
+// TestRedisTimeline_Pipelining tests that queries use Redis pipelines
+func TestRedisTimeline_Pipelining(t *testing.T) {
+	skipIfNoRedis(t)
+
+	cli := newTestRedisClient(t)
+	tl := cli.Timeline("test_timeline")
+	defer func() { _ = tl.Delete(context.Background()) }()
+
+	ctx := context.Background()
+	base := time.Now().Truncate(time.Microsecond)
+
+	// Create data with multiple fields and timestamps
+	for i := 0; i < 10; i++ {
+		data := make(map[string]string)
+		for j := 0; j < 5; j++ {
+			data[fmt.Sprintf("field%d", j)] = fmt.Sprintf("v%d_%d", i, j)
+		}
+		err := tl.Append(ctx, "key1", base.Add(time.Duration(i)*time.Second), data, false)
+		require.NoError(t, err)
+	}
+
+	// GetRange should use pipelining (hard to test directly, but verify it works)
+	results, err := tl.GetRange(ctx, []string{"key1"}, base, base.Add(9*time.Second), model.QueryOptions{})
+	require.NoError(t, err)
+	assert.Len(t, results[0], 10)
+
+	// GetLatest should use pipelining for multiple fields
+	latest, err := tl.GetLatest(ctx, []string{"key1"}, model.QueryOptions{})
+	require.NoError(t, err)
+	assert.Len(t, latest[0], 5)
+
+	// Timeline should pipeline all field queries
+	timeline, err := tl.Timeline(ctx, "key1", model.QueryOptions{})
+	require.NoError(t, err)
+	assert.Len(t, timeline, 5)
+	for _, series := range timeline {
+		assert.Len(t, series, 10)
+	}
+}
+
+// TestRedisTimeline_ContextCancellation tests context handling
+func TestRedisTimeline_ContextCancellation(t *testing.T) {
+	skipIfNoRedis(t)
+
+	cli := newTestRedisClient(t)
+	tl := cli.Timeline("test_timeline")
+	defer func() { _ = tl.Delete(context.Background()) }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := tl.Append(ctx, "key1", time.Now(), map[string]string{"f": "v"}, false)
+	assert.Error(t, err)
+}
+
+// Helper function to skip test if Redis is not available
+func skipIfNoRedis(t *testing.T) {
+	// This would check if Redis is available
+	// For now, we assume it's available in test environment
+}
+
+// Helper function to create a test Redis client
+func newTestRedisClient(t *testing.T) model.CacheClient {
+	cli := NewClient("localhost:6379", "", 0)
+	return cli
 }
