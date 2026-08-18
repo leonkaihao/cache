@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/leonkaihao/cache/v2/pkg/model"
 )
 
 func BenchmarkTimeline_Append(b *testing.B) {
@@ -35,7 +37,7 @@ func BenchmarkTimeline_GetAt(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = tl.GetAt(ctx, []string{"key1"}, now.Add(500*time.Millisecond))
+		_, _ = tl.GetAt(ctx, []string{"key1"}, now.Add(500*time.Millisecond), model.QueryOptions{})
 	}
 }
 
@@ -44,7 +46,7 @@ func BenchmarkTimeline_GetAt_LargeTimeline(b *testing.B) {
 	tl := cli.Timeline("bench_timeline_large")
 	ctx := context.Background()
 
-	// Setup: Add 10K points to stress-test binary search
+	// Setup: Add 10K points to stress-test skiplist lookups
 	now := time.Now()
 	for i := 0; i < 10000; i++ {
 		_ = tl.Append(ctx, "key1", now.Add(time.Duration(i)*time.Millisecond), map[string]string{
@@ -54,7 +56,7 @@ func BenchmarkTimeline_GetAt_LargeTimeline(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = tl.GetAt(ctx, []string{"key1"}, now.Add(5000*time.Millisecond))
+		_, _ = tl.GetAt(ctx, []string{"key1"}, now.Add(5000*time.Millisecond), model.QueryOptions{})
 	}
 }
 
@@ -73,16 +75,16 @@ func BenchmarkTimeline_GetRange(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = tl.GetRange(ctx, []string{"key1"}, now, now.Add(100*time.Millisecond))
+		_, _ = tl.GetRange(ctx, []string{"key1"}, now, now.Add(100*time.Millisecond), model.QueryOptions{})
 	}
 }
 
-func BenchmarkTimeline_GetRange_IncrementalMerge(b *testing.B) {
+func BenchmarkTimeline_GetRange_MultipleFields(b *testing.B) {
 	cli := NewClient().(*client)
-	tl := cli.Timeline("bench_timeline_inc")
+	tl := cli.Timeline("bench_timeline_fields")
 	ctx := context.Background()
 
-	// Setup: Add 1000 points with 10 fields each to stress-test merge performance
+	// Setup: Add 1000 points with 10 fields each
 	now := time.Now()
 	for i := 0; i < 1000; i++ {
 		data := make(map[string]string)
@@ -92,15 +94,15 @@ func BenchmarkTimeline_GetRange_IncrementalMerge(b *testing.B) {
 		_ = tl.Append(ctx, "key1", now.Add(time.Duration(i)*time.Millisecond), data, false)
 	}
 
-	// Query a 100-point range to measure incremental merge efficiency
+	// Query a 100-point range
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = tl.GetRange(ctx, []string{"key1"}, now, now.Add(100*time.Millisecond))
+		_, _ = tl.GetRange(ctx, []string{"key1"}, now, now.Add(100*time.Millisecond), model.QueryOptions{})
 	}
 }
 
-// BenchmarkTimeline_GetLatest_CacheHit measures performance of consecutive GetLatest calls
-func BenchmarkTimeline_GetLatest_CacheHit(b *testing.B) {
+// BenchmarkTimeline_GetLatest measures performance of GetLatest calls
+func BenchmarkTimeline_GetLatest(b *testing.B) {
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline_latest")
 	ctx := context.Background()
@@ -115,13 +117,9 @@ func BenchmarkTimeline_GetLatest_CacheHit(b *testing.B) {
 		}, false)
 	}
 
-	// Prime the cache with one call
-	_, _ = tl.GetLatest(ctx, []string{"key1"})
-
 	b.ResetTimer()
-	// Measure consecutive reads (cache hits)
 	for i := 0; i < b.N; i++ {
-		_, _ = tl.GetLatest(ctx, []string{"key1"})
+		_, _ = tl.GetLatest(ctx, []string{"key1"}, model.QueryOptions{})
 	}
 }
 
@@ -139,9 +137,8 @@ func BenchmarkTimeline_SparseUpdates(b *testing.B) {
 	}
 }
 
-// --- GetUpdatedKeys benchmarks ---
-
-func BenchmarkTimeline_GetUpdatedKeys_100Keys(b *testing.B) {
+// BenchmarkTimeline_KeysWithAfterTs benchmarks time-based key filtering
+func BenchmarkTimeline_KeysWithAfterTs_100Keys(b *testing.B) {
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline")
 	ctx := context.Background()
@@ -159,11 +156,11 @@ func BenchmarkTimeline_GetUpdatedKeys_100Keys(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = tl.GetUpdatedKeys(ctx, queryAfter)
+		_, _ = tl.Keys(ctx, model.FilterOptions{AfterTs: &queryAfter})
 	}
 }
 
-func BenchmarkTimeline_GetUpdatedKeys_1KKeys(b *testing.B) {
+func BenchmarkTimeline_KeysWithAfterTs_1KKeys(b *testing.B) {
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline")
 	ctx := context.Background()
@@ -181,11 +178,11 @@ func BenchmarkTimeline_GetUpdatedKeys_1KKeys(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = tl.GetUpdatedKeys(ctx, queryAfter)
+		_, _ = tl.Keys(ctx, model.FilterOptions{AfterTs: &queryAfter})
 	}
 }
 
-func BenchmarkTimeline_GetUpdatedKeys_10KKeys(b *testing.B) {
+func BenchmarkTimeline_KeysWithAfterTs_10KKeys(b *testing.B) {
 	cli := NewClient().(*client)
 	tl := cli.Timeline("bench_timeline")
 	ctx := context.Background()
@@ -203,6 +200,6 @@ func BenchmarkTimeline_GetUpdatedKeys_10KKeys(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = tl.GetUpdatedKeys(ctx, queryAfter)
+		_, _ = tl.Keys(ctx, model.FilterOptions{AfterTs: &queryAfter})
 	}
 }
