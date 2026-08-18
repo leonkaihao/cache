@@ -16,9 +16,15 @@ test:
 	CGO_ENABLED=1 $(GOVERSION) test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
 test/bench:
 	$(GOVERSION) mod tidy && $(GOVERSION) test -bench=. -benchmem ./pkg/...
-test/bench-integration:
+test/bench-integration: 
 	$(GOVERSION) mod tidy && $(GOVERSION) test -bench=. -benchmem --tags=integration ./pkg/...
 test/integration:
 	$(GOVERSION) test -v --tags=integration ./...
 clean:
-	rm -rf $(CURDIR)/bin
+	rm -rf $(CURDIR)/
+env_setup:
+# if no docker redis is running locally, enable redis service locally
+	if [ -z "$$(docker ps -q -f name=myredis)" ]; then \
+		docker rm -f myredis || true; \
+		docker run -d --name myredis -p 6379:6379 redis; \
+	fi

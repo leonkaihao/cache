@@ -19,7 +19,7 @@ A flexible and type-safe caching library for Go with support for both in-memory 
 - **Time-Based Updates**: Conditional updates based on timestamps
 - **Expiration Support**: Built-in TTL and expiration callbacks
 - **Collections**: Manage sets of members associated with keys
-- **Timeline**: Time-indexed state storage with sparse field updates, out-of-order insertion support, and config-driven retention policies
+- **Timeline**: Time-indexed state storage with **per-field time series**, sparse field updates, out-of-order insertion support, and **per-field retention policies** (v3.0+)
 - **Configurable Timeouts**: Per-client timeout configuration for Redis operations
 
 ## Installation
@@ -95,21 +95,23 @@ if err := timeline.Append(ctx, "device_A", time.Now().Add(5*time.Minute), map[st
 }
 
 // Query current state (merged from all updates)
-states, err := timeline.GetLatest(ctx, []string{"device_A"})
+states, err := timeline.GetLatest(ctx, []string{"device_A"}, model.QueryOptions{})
 if err != nil {
     log.Fatal(err)
 }
 state := states[0]
 log.Printf("Current state: zones=%s, beacons=%s, battery=%s\n",
-    state["zones"], state["beacons"], state["battery"])
+    state["zones"].Value, state["beacons"].Value, state["battery"].Value)
 // Output: zones=Z1,Z3,Z5, beacons=B5, battery=85
 
-// Query historical state
-historicalStates, err := timeline.GetAt(ctx, []string{"device_A"}, time.Now().Add(-10*time.Minute))
+// Query historical state (10 minutes ago)
+historicalStates, err := timeline.GetAt(ctx, []string{"device_A"}, time.Now().Add(-10*time.Minute), model.QueryOptions{})
 if err != nil {
     log.Fatal(err)
 }
 historicalState := historicalStates[0]
+log.Printf("Historical: zones=%s (updated at %v)\n",
+    historicalState["zones"].Value, historicalState["zones"].Time)
 
 // Insert out-of-order event
 lateEvent := time.Now().Add(-1 * time.Hour)
@@ -120,11 +122,28 @@ if err := timeline.Insert(ctx, "device_A", lateEvent, map[string]string{
 }
 
 // Find affected states for recomputation
-affected, err := timeline.GetAffectedRange(ctx, "device_A", lateEvent)
+affected, err := timeline.GetAffectedRange(ctx, "device_A", lateEvent, model.QueryOptions{})
 if err != nil {
     log.Fatal(err)
 }
 log.Printf("States needing recomputation: %d\n", len(affected))
+
+// Query only specific fields
+filteredStates, err := timeline.GetLatest(ctx, []string{"device_A"}, model.QueryOptions{
+    Fields: []string{"zones", "battery"}, // only fetch these fields
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+// Find keys updated after a timestamp
+recentKeys, err := timeline.Keys(ctx, model.FilterOptions{
+    AfterTs: &lateEvent, // only keys updated after this time
+})
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("Recently updated keys: %v\n", recentKeys)
 ```
 
 ### Redis Cache
@@ -309,15 +328,16 @@ type TimelineData interface {
     Insert(ctx context.Context, key string, ts time.Time, data map[string]string, force bool) error
     
     // Batch query operations (results parallel to keys, nil = no data, BatchError = partial failure)
-    GetAt(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error)
-    GetExact(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error)
-    GetRange(ctx context.Context, keys []string, start, end time.Time) ([][]*TimeValue, error)
-    GetLatest(ctx context.Context, keys []string) ([]map[string]string, error)
-    Timeline(ctx context.Context, key string) ([]*TimeValue, error)
-    GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]*TimeValue, error)
-    GetUpdatedKeys(ctx context.Context, after time.Time) ([]string, error)
+    // Returns map[string]*FieldTimeValue per key, where each field has its own timestamp
+    GetAt(ctx context.Context, keys []string, ts time.Time, opts QueryOptions) ([]map[string]*FieldTimeValue, error)
+    GetRange(ctx context.Context, keys []string, start, end time.Time, opts QueryOptions) ([][]*TimeValue, error)
+    GetLatest(ctx context.Context, keys []string, opts QueryOptions) ([]map[string]*FieldTimeValue, error)
     
-    // Keys supports label-based filtering: OR within array, AND between arrays
+    // Timeline returns per-field time series: map[fieldName][]*FieldTimeValue
+    Timeline(ctx context.Context, key string, opts QueryOptions) (map[string][]*FieldTimeValue, error)
+    GetAffectedRange(ctx context.Context, key string, insertedAt time.Time, opts QueryOptions) ([]*TimeValue, error)
+    
+    // Keys supports label-based filtering and timestamp filtering
     Keys(ctx context.Context, opt FilterOptions) ([]string, error)
     
     // Management
@@ -341,6 +361,41 @@ type CacheTimeline interface {
     GetOptions() TimelineOptions
 }
 ```
+
+#### Timeline Types (v3.0+)
+
+```go
+// FieldTimeValue represents a single field's value with its timestamp
+type FieldTimeValue struct {
+    Value string    // Field value
+    Time  time.Time // When this field was last updated
+}
+
+// QueryOptions controls which fields to retrieve and how to filter
+type QueryOptions struct {
+    Fields []string // If non-empty, only fetch these fields
+}
+
+// FilterOptions for Keys() method
+type FilterOptions struct {
+    LabelFilter [][]string // OR within array, AND between arrays
+    AfterTs     *time.Time  // Only keys updated after this timestamp
+}
+
+// TimeValue represents a complete state snapshot at a point in time
+type TimeValue struct {
+    Time   time.Time
+    Values map[string]*FieldTimeValue // Field name -> value with timestamp
+}
+```
+
+**Key Changes in v3.0**:
+- Each field maintains its own timestamp (data freshness visibility)
+- Per-field retention (low-frequency fields no longer lost)
+- Field filtering via `QueryOptions.Fields` (fetch only what you need)
+- Time-based key filtering via `FilterOptions.AfterTs` (replaces `GetUpdatedKeys`)
+- `Timeline()` returns per-field time series instead of merged snapshots
+- Removed methods: `GetExact()`, `GetUpdatedKeys()` (use `Keys()` with `AfterTs`)
 
 ## Advanced Features
 
@@ -480,7 +535,7 @@ ctx := context.Background()
 timeline := cli.Timeline("device_states")
 
 // Query multiple devices at once
-states, err := timeline.GetLatest(ctx, []string{"device_A", "device_B", "device_C"})
+states, err := timeline.GetLatest(ctx, []string{"device_A", "device_B", "device_C"}, model.QueryOptions{})
 if err != nil {
     log.Fatal(err)
 }
@@ -491,13 +546,14 @@ for i, key := range []string{"device_A", "device_B", "device_C"} {
     if states[i] == nil {
         log.Printf("%s: no data", key)
     } else {
-        log.Printf("%s: battery=%s zones=%s", key, states[i]["battery"], states[i]["zones"])
+        log.Printf("%s: battery=%s zones=%s", key, 
+            states[i]["battery"].Value, states[i]["zones"].Value)
     }
 }
 
 // Batch historical queries
 ts := time.Now().Add(-1 * time.Hour)
-historicalStates, err := timeline.GetAt(ctx, []string{"device_A", "device_B"}, ts)
+historicalStates, err := timeline.GetAt(ctx, []string{"device_A", "device_B"}, ts, model.QueryOptions{})
 if err != nil {
     log.Fatal(err)
 }
@@ -577,13 +633,13 @@ westSensors, err := timeline.Keys(ctx, model.FilterOptions{
 // Returns: ["device_A", "device_B"]
 
 // Combine label filtering with batch queries
-states, err := timeline.GetLatest(ctx, westSensors)
+states, err := timeline.GetLatest(ctx, westSensors, model.QueryOptions{})
 if err != nil {
     log.Fatal(err)
 }
 for i, key := range westSensors {
     if states[i] != nil {
-        log.Printf("%s: %v", key, states[i])
+        log.Printf("%s: battery=%s", key, states[i]["battery"].Value)
     }
 }
 
@@ -604,7 +660,7 @@ ctx := context.Background()
 timeline := cli.Timeline("device_states")
 
 deviceIDs := []string{"device_A", "device_B", "device_C", "device_D"}
-states, err := timeline.GetLatest(ctx, deviceIDs)
+states, err := timeline.GetLatest(ctx, deviceIDs, model.QueryOptions{})
 
 if err != nil {
     var batchErr *model.BatchError
@@ -645,13 +701,13 @@ if err != nil {
 #### Understanding Nil in Batch Results
 
 ```go
-// GetLatest/GetAt/GetExact: []map[string]string
-states, err := timeline.GetLatest(ctx, []string{"key1", "key2"})
+// GetLatest/GetAt: []map[string]*FieldTimeValue
+states, err := timeline.GetLatest(ctx, []string{"key1", "key2"}, model.QueryOptions{})
 // states[i] == nil → "key i has no data" (NOT an error, just no time points exist)
 // err != nil && errors.As(err, &BatchError{}) → partial failure (check KeyErrors for which keys failed)
 
 // GetRange: [][]*TimeValue
-ranges, err := timeline.GetRange(ctx, []string{"key1", "key2"}, start, end)
+ranges, err := timeline.GetRange(ctx, []string{"key1", "key2"}, start, end, model.QueryOptions{})
 // ranges[i] == nil → "key i has no time points in the range"
 // ranges[i][j] → Always non-nil if ranges[i] != nil (pointers avoid copying)
 ```
@@ -664,9 +720,11 @@ Find keys that were updated after a specific timestamp:
 ctx := context.Background()
 timeline := cli.Timeline("device_states")
 
-// Get all keys updated in the last hour
+// Get all keys updated in the last hour (v3.0+)
 lastHour := time.Now().Add(-1 * time.Hour)
-recentKeys, err := timeline.GetUpdatedKeys(ctx, lastHour)
+recentKeys, err := timeline.Keys(ctx, model.FilterOptions{
+    AfterTs: &lastHour,
+})
 if err != nil {
     log.Fatal(err)
 }
@@ -674,11 +732,17 @@ log.Printf("Keys updated since %v: %v", lastHour, recentKeys)
 
 // Query only recently updated devices
 if len(recentKeys) > 0 {
-    states, err := timeline.GetLatest(ctx, recentKeys)
+    states, err := timeline.GetLatest(ctx, recentKeys, model.QueryOptions{})
     if err != nil {
         log.Fatal(err)
     }
     // Process recent device states
+    for i, key := range recentKeys {
+        if states[i] != nil {
+            log.Printf("%s: battery=%s (updated at %v)", 
+                key, states[i]["battery"].Value, states[i]["battery"].Time)
+        }
+    }
 }
 ```
 
