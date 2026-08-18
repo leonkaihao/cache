@@ -33,45 +33,38 @@ type TimelineData interface {
 	Keys(ctx context.Context, opt FilterOptions) ([]string, error)
 
 	// GetAt returns the complete merged state at or before ts for each key.
+	// Each field in the result includes its actual update timestamp.
 	// Results are parallel to keys: results[i] corresponds to keys[i].
 	// nil at results[i] means keys[i] has no state at or before ts (not an error).
 	// Returns *BatchError if one or more keys encountered retrieval errors.
-	GetAt(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error)
-
-	// GetExact returns the raw sparse fields at the exact timestamp for each key.
-	// Results are parallel to keys: results[i] corresponds to keys[i].
-	// nil at results[i] means keys[i] has no time point at exactly ts (not an error).
-	// Returns *BatchError if one or more keys encountered retrieval errors.
-	GetExact(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error)
+	GetAt(ctx context.Context, keys []string, ts time.Time, opts QueryOptions) ([]map[string]*FieldTimeValue, error)
 
 	// GetRange returns all complete states in [start, end] for each key.
+	// Returns time points where any of the specified fields (or all fields if opts.Fields=nil) has an update.
+	// Each TimeValue includes per-field timestamps indicating actual source time of each value.
 	// Results are parallel to keys: results[i] corresponds to keys[i].
 	// nil at results[i] means keys[i] has no time points in the range (not an error).
 	// Non-nil inner slices contain only non-nil *TimeValue pointers.
 	// Returns *BatchError if one or more keys encountered retrieval errors.
-	GetRange(ctx context.Context, keys []string, start, end time.Time) ([][]*TimeValue, error)
+	GetRange(ctx context.Context, keys []string, start, end time.Time, opts QueryOptions) ([][]*TimeValue, error)
 
 	// GetLatest returns the complete merged state at the most recent timestamp for each key.
+	// Each field in the result includes its actual update timestamp.
 	// Results are parallel to keys: results[i] corresponds to keys[i].
 	// nil at results[i] means keys[i] has no time-series data (not an error).
 	// Returns *BatchError if one or more keys encountered retrieval errors.
-	GetLatest(ctx context.Context, keys []string) ([]map[string]string, error)
+	GetLatest(ctx context.Context, keys []string, opts QueryOptions) ([]map[string]*FieldTimeValue, error)
 
-	// Timeline returns all complete states for the key in chronological order.
-	// Each element is a non-nil *TimeValue pointer.
-	Timeline(ctx context.Context, key string) ([]*TimeValue, error)
+	// Timeline returns field-grouped time series for the key.
+	// Each field's array contains only its own update points (not interpolated values).
+	// Returns a map from field name to chronologically ordered time series.
+	Timeline(ctx context.Context, key string, opts QueryOptions) (map[string][]*FieldTimeValue, error)
 
 	// GetAffectedRange returns all states from insertedAt (inclusive) to end of timeline.
 	// Used for recomputation after historical insertion.
+	// Returns time points where any of the specified fields (or all fields if opts.Fields=nil) changed.
 	// Each element is a non-nil *TimeValue pointer.
-	GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]*TimeValue, error)
-
-	// GetUpdatedKeys returns all keys that have been updated after the specified timestamp.
-	// The timestamp boundary is exclusive: only keys with updates strictly after the timestamp are returned.
-	// Each key appears at most once in the result, even if it was updated multiple times.
-	// Result order is unordered and implementation-defined.
-	// Returns an empty slice if no keys were updated after the timestamp.
-	GetUpdatedKeys(ctx context.Context, after time.Time) ([]string, error)
+	GetAffectedRange(ctx context.Context, key string, insertedAt time.Time, opts QueryOptions) ([]*TimeValue, error)
 
 	// Remove removes the specified keys from the timeline.
 	Remove(ctx context.Context, keys []string) error
@@ -112,10 +105,23 @@ type CacheTimeline interface {
 	GetOptions() TimelineOptions
 }
 
+// FieldTimeValue represents a field's value at a specific time.
+// Used both for time series (Timeline method) and merged state (GetAt, GetLatest).
+type FieldTimeValue struct {
+	Time  time.Time // When this field was last updated
+	Value string    // The field's value
+}
+
 // TimeValue represents a moment in time with its associated complete state.
+// Each field in Value includes its actual update timestamp.
 type TimeValue struct {
-	Time  time.Time
-	Value map[string]string
+	Time  time.Time                   // The snapshot timestamp
+	Value map[string]*FieldTimeValue // Fields with per-field timestamps
+}
+
+// QueryOptions specifies which fields to query.
+type QueryOptions struct {
+	Fields []string // Specific fields to query. nil means all fields.
 }
 
 // TimelineOptions defines configuration options for a timeline.
@@ -124,9 +130,10 @@ type TimelineOptions struct {
 }
 
 // RetentionPolicy defines automatic data lifecycle management rules.
+// In field-level storage, MaxCount and MaxDuration are applied per-field independently.
 type RetentionPolicy struct {
-	MaxCount    int               // Maximum number of time points per key (0 = unlimited)
-	MaxDuration time.Duration     // Maximum age of time points (0 = unlimited)
+	MaxCount    int               // Maximum number of time points per field (0 = unlimited)
+	MaxDuration time.Duration     // Maximum age of time points per field (0 = unlimited)
 	Strategy    RetentionStrategy // Strategy for applying count and duration constraints
 }
 
