@@ -11,6 +11,7 @@ import (
 
 	"github.com/leonkaihao/cache/v2/pkg/coding"
 	"github.com/leonkaihao/cache/v2/pkg/consts"
+	"github.com/leonkaihao/cache/v2/pkg/model"
 	redis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -422,9 +423,9 @@ func TestTimelineClear_OperationsWorkAfterClear(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify new data exists
-	results, err := tl.GetLatest(ctx, []string{"key2"})
+	results, err := tl.GetLatest(ctx, []string{"key2"}, model.QueryOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, "value2", results[0]["field2"])
+	assert.Equal(t, "value2", results[0]["field2"].Value)
 }
 
 // Test clearing with special characters in name

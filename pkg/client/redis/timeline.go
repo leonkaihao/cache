@@ -3,6 +3,8 @@ package redis
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,7 +13,7 @@ import (
 	redis "github.com/redis/go-redis/v9"
 )
 
-// redisTimeline implements the CacheTimeline interface using Redis backend.
+// redisTimeline implements the CacheTimeline interface using Redis backend with field-level storage.
 type redisTimeline struct {
 	name      string
 	cli       *client
@@ -19,21 +21,26 @@ type redisTimeline struct {
 	mu        sync.RWMutex
 }
 
-// Key generation helpers following the pattern: T@{name}/K/, T@{name}/K/{key}/TS/, T@{name}/K/{key}/{ts}
+// Key generation helpers for field-level storage pattern:
+// T@{name}/K/                          - SET of all keys
+// T@{name}/F/                          - SET of all field names (union across all keys)
+// T@{name}/K/{key}/F/{field}           - ZSET: score=timestamp, member="{ts}:{value}"
+// T@{name}/L/                          - SET of all labels
+// T@{name}/L/{label}                   - SET of keys with this label (inverted index)
+// T@{name}/K/{key}/L                   - SET of labels for this key (forward index)
+// T@{name}/GTS                         - ZSET: key -> latest timestamp (for AfterTs filtering)
 
 func formatTimelineKeys(name string) string {
 	return fmt.Sprintf("%s%s/%s", consts.TIMELINE_PREFIX, name, consts.KEYS_PREFIX)
 }
 
-func formatTimelineTS(name, key string) string {
-	return fmt.Sprintf("%s%s/%s%s/%s", consts.TIMELINE_PREFIX, name, consts.KEYS_PREFIX, key, consts.TS_PREFIX)
+func formatTimelineFields(name string) string {
+	return fmt.Sprintf("%s%s/%s", consts.TIMELINE_PREFIX, name, consts.FIELDS_PREFIX)
 }
 
-func formatTimelineData(name, key string, tsMicros int64) string {
-	return fmt.Sprintf("%s%s/%s%s/%d", consts.TIMELINE_PREFIX, name, consts.KEYS_PREFIX, key, tsMicros)
+func formatTimelineField(name, key, field string) string {
+	return fmt.Sprintf("%s%s/%s%s/%s%s", consts.TIMELINE_PREFIX, name, consts.KEYS_PREFIX, key, consts.FIELDS_PREFIX, field)
 }
-
-// Label key helpers: T@{name}/L/, T@{name}/L/{label}, T@{name}/K/{key}/L
 
 func formatTimelineLabels(name string) string {
 	return fmt.Sprintf("%s%s/%s", consts.TIMELINE_PREFIX, name, consts.LABELS_PREFIX)
@@ -51,9 +58,40 @@ func formatTimelineGlobalTS(name string) string {
 	return fmt.Sprintf("%s%s/%s", consts.TIMELINE_PREFIX, name, consts.GLOBAL_TS_SUFFIX)
 }
 
+// encodeMember encodes timestamp and value into ZSET member format: "{ts}:{value}"
+func encodeMember(tsMicros int64, value string) string {
+	return fmt.Sprintf("%d:%s", tsMicros, value)
+}
+
+// decodeMember decodes ZSET member format "{ts}:{value}" into timestamp and value
+func decodeMember(member string) (int64, string, error) {
+	parts := strings.SplitN(member, ":", 2)
+	if len(parts) != 2 {
+		return 0, "", fmt.Errorf("invalid member format: %s", member)
+	}
+	ts, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, "", fmt.Errorf("invalid timestamp in member: %s", member)
+	}
+	return ts, parts[1], nil
+}
+
 // normalizeTimestamp truncates a time.Time to microsecond precision and returns microseconds since epoch.
 func normalizeTimestamp(ts time.Time) int64 {
 	return ts.Truncate(time.Microsecond).UnixMicro()
+}
+
+// shouldIncludeField checks if a field should be included based on QueryOptions.
+func shouldIncludeField(fieldName string, fieldsFilter []string) bool {
+	if len(fieldsFilter) == 0 {
+		return true // nil means all fields
+	}
+	for _, f := range fieldsFilter {
+		if f == fieldName {
+			return true
+		}
+	}
+	return false
 }
 
 // Name returns the timeline name.
@@ -63,68 +101,74 @@ func (t *redisTimeline) Name() string {
 
 // Append adds or updates fields at the specified timestamp.
 func (t *redisTimeline) Append(ctx context.Context, key string, ts time.Time, data map[string]string, force bool) error {
-	// Check context cancellation
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
 
-	// Validate inputs
 	if key == "" {
 		return fmt.Errorf("key cannot be empty")
 	}
-
-	// Empty data is a no-op
 	if len(data) == 0 {
 		return nil
 	}
 
-	// Normalize timestamp
 	tsMicros := normalizeTimestamp(ts)
-
 	redisCli := t.cli.getRedisCli()
-	dataKey := formatTimelineData(t.name, key, tsMicros)
-	tsKey := formatTimelineTS(t.name, key)
 	keysKey := formatTimelineKeys(t.name)
+	fieldsKey := formatTimelineFields(t.name)
 	globalTSKey := formatTimelineGlobalTS(t.name)
 
 	// Check for field conflicts if force=false
 	if !force {
-		existing, err := redisCli.HGetAll(ctx, dataKey).Result()
-		if err == nil {
-			for field, newValue := range data {
-				if existingValue, exists := existing[field]; exists && existingValue != newValue {
-					return fmt.Errorf("field '%s' already exists at %s", field, time.UnixMicro(tsMicros).Format(time.RFC3339Nano))
+		pipe := redisCli.Pipeline()
+		cmds := make(map[string]*redis.StringSliceCmd)
+		
+		for fieldName := range data {
+			fieldKey := formatTimelineField(t.name, key, fieldName)
+			cmds[fieldName] = pipe.ZRangeByScore(ctx, fieldKey, &redis.ZRangeBy{
+				Min: fmt.Sprintf("%d", tsMicros),
+				Max: fmt.Sprintf("%d", tsMicros),
+			})
+		}
+		
+		_, _ = pipe.Exec(ctx)
+		
+		for fieldName, newValue := range data {
+			members, err := cmds[fieldName].Result()
+			if err == nil && len(members) > 0 {
+				// Found existing member at this timestamp
+				_, existingValue, err := decodeMember(members[0])
+				if err == nil && existingValue != newValue {
+					return fmt.Errorf("field '%s' already exists at %s", fieldName, time.UnixMicro(tsMicros).Format(time.RFC3339Nano))
 				}
 			}
 		}
 	}
 
-	// Add timestamp to ZSET
-	if err := redisCli.ZAdd(ctx, tsKey, redis.Z{Score: float64(tsMicros), Member: fmt.Sprintf("%d", tsMicros)}).Err(); err != nil {
-		return fmt.Errorf("failed to add timestamp: %w", err)
+	// Write all fields
+	pipe := redisCli.Pipeline()
+	
+	for fieldName, value := range data {
+		fieldKey := formatTimelineField(t.name, key, fieldName)
+		member := encodeMember(tsMicros, value)
+		pipe.ZAdd(ctx, fieldKey, redis.Z{Score: float64(tsMicros), Member: member})
+		// Maintain timeline-level field set (union of all fields across all keys)
+		pipe.SAdd(ctx, fieldsKey, fieldName)
 	}
-
-	// Set fields in HASH
-	for field, value := range data {
-		if err := redisCli.HSet(ctx, dataKey, field, value).Err(); err != nil {
-			return fmt.Errorf("failed to set field: %w", err)
-		}
-	}
-
+	
 	// Add key to keys set
-	if err := redisCli.SAdd(ctx, keysKey, key).Err(); err != nil {
-		return fmt.Errorf("failed to add key to set: %w", err)
-	}
-
+	pipe.SAdd(ctx, keysKey, key)
+	
 	// Update global timestamp index
-	if err := redisCli.ZAdd(ctx, globalTSKey, redis.Z{Score: float64(tsMicros), Member: key}).Err(); err != nil {
-		return fmt.Errorf("failed to update global timestamp index: %w", err)
+	pipe.ZAdd(ctx, globalTSKey, redis.Z{Score: float64(tsMicros), Member: key})
+	
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("failed to write data: %w", err)
 	}
 
 	// Enforce retention policy (best-effort)
-	// Data is already written successfully; if cleanup fails, log but don't fail the write
 	if err := t.enforceRetention(ctx, key); err != nil {
 		Logger.Error("retention enforcement failed",
 			"key", key,
@@ -137,12 +181,11 @@ func (t *redisTimeline) Append(ctx context.Context, key string, ts time.Time, da
 
 // Insert adds or updates fields at the specified timestamp (supports out-of-order writes).
 func (t *redisTimeline) Insert(ctx context.Context, key string, ts time.Time, data map[string]string, force bool) error {
-	// Insert has same implementation as Append for Redis
 	return t.Append(ctx, key, ts, data, force)
 }
 
 // GetAt returns the complete merged state at or before ts for each key.
-func (t *redisTimeline) GetAt(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error) {
+func (t *redisTimeline) GetAt(ctx context.Context, keys []string, ts time.Time, opts model.QueryOptions) ([]map[string]*model.FieldTimeValue, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -151,141 +194,78 @@ func (t *redisTimeline) GetAt(ctx context.Context, keys []string, ts time.Time) 
 
 	tsMicros := normalizeTimestamp(ts)
 	redisCli := t.cli.getRedisCli()
-	results := make([]map[string]string, len(keys))
+	fieldsKey := formatTimelineFields(t.name)
+	results := make([]map[string]*model.FieldTimeValue, len(keys))
 	be := model.NewBatchError(len(keys))
 
-	// Phase 1: Pipeline all ZRangeArgs commands to fetch timestamps ≤ ts
-	pipe := redisCli.Pipeline()
-	zrangeCmds := make([]*redis.StringSliceCmd, len(keys))
+	// Get all known fields for this timeline
+	fieldNames, err := redisCli.SMembers(ctx, fieldsKey).Result()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("failed to get timeline fields: %w", err)
+	}
+
+	// For each key, query all known fields
 	for i, key := range keys {
-		tsKey := formatTimelineTS(t.name, key)
-		zrangeCmds[i] = pipe.ZRangeArgs(ctx, redis.ZRangeArgs{
-			Key:     tsKey,
-			Start:   "-inf",
-			Stop:    fmt.Sprintf("%d", tsMicros),
-			ByScore: true,
-		})
-	}
-
-	// Pipeline execution may fail, but individual commands may have succeeded
-	_, _ = pipe.Exec(ctx)
-
-	// Phase 2: Collect timestamp results and build flat list of HGetAll operations
-	type hgetSpec struct {
-		keyIdx int
-		tsStr  string
-	}
-	var hgetSpecs []hgetSpec
-
-	for i, cmd := range zrangeCmds {
-		timestamps, err := cmd.Result()
-		if err != nil && err != redis.Nil {
-			be.Add(keys[i], fmt.Errorf("failed to query timestamps: %w", err))
-			continue
-		}
-		if len(timestamps) == 0 {
+		if len(fieldNames) == 0 {
 			results[i] = nil
 			continue
 		}
-		// Add all HGetAll operations needed for this key
-		for _, tsStr := range timestamps {
-			hgetSpecs = append(hgetSpecs, hgetSpec{keyIdx: i, tsStr: tsStr})
+
+		// For each field, get the latest value at or before ts
+		pipe := redisCli.Pipeline()
+		cmds := make([]*redis.StringSliceCmd, len(fieldNames))
+		
+		for j, fieldName := range fieldNames {
+			if !shouldIncludeField(fieldName, opts.Fields) {
+				continue
+			}
+			
+			fieldKey := formatTimelineField(t.name, key, fieldName)
+			// Query for values <= ts, get the last one
+			cmds[j] = pipe.ZRevRangeByScore(ctx, fieldKey, &redis.ZRangeBy{
+				Min:   "-inf",
+				Max:   fmt.Sprintf("%d", tsMicros),
+				Count: 1,
+			})
 		}
-	}
-
-	if len(hgetSpecs) == 0 {
-		return results, be.OrNil()
-	}
-
-	// Phase 3: Pipeline all HGetAll commands for data fetching
-	pipe = redisCli.Pipeline()
-	hgetCmds := make([]*redis.MapStringStringCmd, len(hgetSpecs))
-	for i, spec := range hgetSpecs {
-		dataKey := formatTimelineData(t.name, keys[spec.keyIdx], mustParseInt64(spec.tsStr))
-		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
-	}
-
-	// Pipeline execution may fail, but individual commands may have succeeded
-	_, _ = pipe.Exec(ctx)
-
-	// Phase 4: Map HGetAll results back to keys, building merged state per key
-	keyMerged := make([]map[string]string, len(keys))
-	keyHasError := make([]bool, len(keys))
-
-	for i, spec := range hgetSpecs {
-		if keyHasError[spec.keyIdx] {
-			continue // Skip processing for keys that already have errors
+		
+		_, _ = pipe.Exec(ctx)
+		
+		result := make(map[string]*model.FieldTimeValue)
+		for j, cmd := range cmds {
+			if cmd == nil || !shouldIncludeField(fieldNames[j], opts.Fields) {
+				continue
+			}
+			
+			members, err := cmd.Result()
+			if err != nil || len(members) == 0 {
+				// Field doesn't exist for this key, skip it
+				continue
+			}
+			
+			fieldTs, fieldValue, err := decodeMember(members[0])
+			if err != nil {
+				continue
+			}
+			
+			result[fieldNames[j]] = &model.FieldTimeValue{
+				Time:  time.UnixMicro(fieldTs),
+				Value: fieldValue,
+			}
 		}
-
-		fields, err := hgetCmds[i].Result()
-		if err != nil && err != redis.Nil {
-			be.Add(keys[spec.keyIdx], fmt.Errorf("failed to get data at %s: %w", spec.tsStr, err))
-			keyHasError[spec.keyIdx] = true
-			continue
-		}
-
-		if keyMerged[spec.keyIdx] == nil {
-			keyMerged[spec.keyIdx] = make(map[string]string)
-		}
-		// Merge fields in chronological order
-		for k, v := range fields {
-			keyMerged[spec.keyIdx][k] = v
-		}
-	}
-
-	// Copy merged results to final results (only for keys without errors)
-	for i := range keys {
-		if !keyHasError[i] && keyMerged[i] != nil {
-			results[i] = keyMerged[i]
-		}
-	}
-
-	return results, be.OrNil()
-}
-
-// GetExact returns the raw sparse fields at the exact timestamp for each key.
-func (t *redisTimeline) GetExact(ctx context.Context, keys []string, ts time.Time) ([]map[string]string, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	tsMicros := normalizeTimestamp(ts)
-	redisCli := t.cli.getRedisCli()
-	results := make([]map[string]string, len(keys))
-	be := model.NewBatchError(len(keys))
-
-	// Pipeline all HGetAll commands
-	pipe := redisCli.Pipeline()
-	cmds := make([]*redis.MapStringStringCmd, len(keys))
-	for i, key := range keys {
-		dataKey := formatTimelineData(t.name, key, tsMicros)
-		cmds[i] = pipe.HGetAll(ctx, dataKey)
-	}
-
-	// Execute pipeline - may fail, but individual commands may have succeeded
-	_, _ = pipe.Exec(ctx)
-
-	// Map results back to keys array
-	for i, cmd := range cmds {
-		result, err := cmd.Result()
-		if err != nil && err != redis.Nil {
-			be.Add(keys[i], fmt.Errorf("failed to get data: %w", err))
-			continue
-		}
+		
 		if len(result) == 0 {
 			results[i] = nil
-			continue
+		} else {
+			results[i] = result
 		}
-		results[i] = result
 	}
 
 	return results, be.OrNil()
 }
 
 // GetRange returns all complete states in [start, end] for each key.
-func (t *redisTimeline) GetRange(ctx context.Context, keys []string, start, end time.Time) ([][]*model.TimeValue, error) {
+func (t *redisTimeline) GetRange(ctx context.Context, keys []string, start, end time.Time, opts model.QueryOptions) ([][]*model.TimeValue, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -295,153 +275,125 @@ func (t *redisTimeline) GetRange(ctx context.Context, keys []string, start, end 
 	startMicros := normalizeTimestamp(start)
 	endMicros := normalizeTimestamp(end)
 	redisCli := t.cli.getRedisCli()
+	fieldsKey := formatTimelineFields(t.name)
 	results := make([][]*model.TimeValue, len(keys))
 	be := model.NewBatchError(len(keys))
 
-	// Phase 1: Pipeline all ZRangeArgs commands to fetch timestamps in [start, end]
-	pipe := redisCli.Pipeline()
-	rangeCmds := make([]*redis.StringSliceCmd, len(keys))
+	// Get all known fields for this timeline
+	fieldNames, err := redisCli.SMembers(ctx, fieldsKey).Result()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("failed to get timeline fields: %w", err)
+	}
+
 	for i, key := range keys {
-		tsKey := formatTimelineTS(t.name, key)
-		rangeCmds[i] = pipe.ZRangeArgs(ctx, redis.ZRangeArgs{
-			Key:     tsKey,
-			Start:   fmt.Sprintf("%d", startMicros),
-			Stop:    fmt.Sprintf("%d", endMicros),
-			ByScore: true,
-		})
-	}
-
-	// Pipeline execution may fail, but individual commands may have succeeded
-	_, _ = pipe.Exec(ctx)
-
-	// Phase 2: Pipeline all ZRangeArgs commands to fetch timestamps in [-inf, end]
-	pipe = redisCli.Pipeline()
-	allCmds := make([]*redis.StringSliceCmd, len(keys))
-	for i, key := range keys {
-		tsKey := formatTimelineTS(t.name, key)
-		allCmds[i] = pipe.ZRangeArgs(ctx, redis.ZRangeArgs{
-			Key:     tsKey,
-			Start:   "-inf",
-			Stop:    fmt.Sprintf("%d", endMicros),
-			ByScore: true,
-		})
-	}
-
-	// Pipeline execution may fail, but individual commands may have succeeded
-	_, _ = pipe.Exec(ctx)
-
-	// Collect results and determine all HGetAll operations needed for merging
-	type hgetSpec struct {
-		keyIdx         int
-		resultIdx      int   // Index in the key's result array
-		resultTsMicros int64 // Timestamp of the result TimeValue
-		mergeTsMicros  int64 // Timestamp of data to merge
-	}
-	var hgetSpecs []hgetSpec
-	keyRangeTimestamps := make([][]string, len(keys))
-	keyAllTimestamps := make([][]string, len(keys))
-
-	for i := range keys {
-		// Get range timestamps
-		timestamps, err := rangeCmds[i].Result()
-		if err != nil && err != redis.Nil {
-			be.Add(keys[i], fmt.Errorf("failed to query timestamps: %w", err))
-			continue
-		}
-		if len(timestamps) == 0 {
+		if len(fieldNames) == 0 {
 			results[i] = nil
 			continue
 		}
-		keyRangeTimestamps[i] = timestamps
 
-		// Get all timestamps for merging
-		allTimestamps, err := allCmds[i].Result()
-		if err != nil && err != redis.Nil {
-			be.Add(keys[i], fmt.Errorf("failed to query all timestamps: %w", err))
-			continue
+		// Collect all unique timestamps in range from all fields
+		timestampsMap := make(map[int64]bool)
+		
+		pipe := redisCli.Pipeline()
+		rangeCmds := make([]*redis.StringSliceCmd, len(fieldNames))
+		
+		for j, fieldName := range fieldNames {
+			if !shouldIncludeField(fieldName, opts.Fields) {
+				continue
+			}
+			
+			fieldKey := formatTimelineField(t.name, key, fieldName)
+			rangeCmds[j] = pipe.ZRangeByScore(ctx, fieldKey, &redis.ZRangeBy{
+				Min: fmt.Sprintf("%d", startMicros),
+				Max: fmt.Sprintf("%d", endMicros),
+			})
 		}
-		keyAllTimestamps[i] = allTimestamps
-
-		// For each result timestamp, determine which data timestamps need to be merged
-		for resultIdx, tsStr := range timestamps {
-			tsMicros := mustParseInt64(tsStr)
-			for _, allTsStr := range allTimestamps {
-				allTsMicros := mustParseInt64(allTsStr)
-				if allTsMicros <= tsMicros {
-					hgetSpecs = append(hgetSpecs, hgetSpec{
-						keyIdx:         i,
-						resultIdx:      resultIdx,
-						resultTsMicros: tsMicros,
-						mergeTsMicros:  allTsMicros,
-					})
+		
+		_, _ = pipe.Exec(ctx)
+		
+		for j, cmd := range rangeCmds {
+			if cmd == nil || !shouldIncludeField(fieldNames[j], opts.Fields) {
+				continue
+			}
+			
+			members, err := cmd.Result()
+			if err != nil {
+				continue
+			}
+			
+			for _, member := range members {
+				fieldTs, _, err := decodeMember(member)
+				if err == nil {
+					timestampsMap[fieldTs] = true
 				}
 			}
 		}
-	}
 
-	if len(hgetSpecs) == 0 {
-		return results, be.OrNil()
-	}
-
-	// Phase 3: Pipeline all HGetAll commands for data fetching
-	pipe = redisCli.Pipeline()
-	hgetCmds := make([]*redis.MapStringStringCmd, len(hgetSpecs))
-	for i, spec := range hgetSpecs {
-		dataKey := formatTimelineData(t.name, keys[spec.keyIdx], spec.mergeTsMicros)
-		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
-	}
-
-	// Pipeline execution may fail, but individual commands may have succeeded
-	_, _ = pipe.Exec(ctx)
-
-	// Build complete merged states for each timestamp using pipelined data
-	type resultKey struct {
-		keyIdx    int
-		resultIdx int
-	}
-	resultMerged := make(map[resultKey]map[string]string)
-	keyHasError := make([]bool, len(keys))
-
-	for i, spec := range hgetSpecs {
-		if keyHasError[spec.keyIdx] {
-			continue
+		// Sort timestamps
+		timestamps := make([]int64, 0, len(timestampsMap))
+		for ts := range timestampsMap {
+			timestamps = append(timestamps, ts)
+		}
+		// Simple bubble sort
+		for a := 0; a < len(timestamps)-1; a++ {
+			for b := a + 1; b < len(timestamps); b++ {
+				if timestamps[a] > timestamps[b] {
+					timestamps[a], timestamps[b] = timestamps[b], timestamps[a]
+				}
+			}
 		}
 
-		fields, err := hgetCmds[i].Result()
-		if err != nil && err != redis.Nil {
-			be.Add(keys[spec.keyIdx], fmt.Errorf("failed to get data at %d: %w", spec.mergeTsMicros, err))
-			keyHasError[spec.keyIdx] = true
-			continue
-		}
-
-		rk := resultKey{keyIdx: spec.keyIdx, resultIdx: spec.resultIdx}
-		if resultMerged[rk] == nil {
-			resultMerged[rk] = make(map[string]string)
-		}
-		// Merge fields in chronological order
-		for k, v := range fields {
-			resultMerged[rk][k] = v
-		}
-	}
-
-	// Build final result array
-	for i := range keys {
-		if keyHasError[i] {
-			continue
-		}
-		if keyRangeTimestamps[i] == nil {
-			continue
-		}
-
+		// For each timestamp, build complete state
 		var tvs []*model.TimeValue
-		for resultIdx, tsStr := range keyRangeTimestamps[i] {
-			tsMicros := mustParseInt64(tsStr)
-			rk := resultKey{keyIdx: i, resultIdx: resultIdx}
-			tvs = append(tvs, &model.TimeValue{
-				Time:  time.UnixMicro(tsMicros),
-				Value: resultMerged[rk],
-			})
+		for _, ts := range timestamps {
+			pipe := redisCli.Pipeline()
+			allCmds := make([]*redis.StringSliceCmd, len(fieldNames))
+			
+			for j, fieldName := range fieldNames {
+				if !shouldIncludeField(fieldName, opts.Fields) {
+					continue
+				}
+				
+				fieldKey := formatTimelineField(t.name, key, fieldName)
+				allCmds[j] = pipe.ZRevRangeByScore(ctx, fieldKey, &redis.ZRangeBy{
+					Min:   "-inf",
+					Max:   fmt.Sprintf("%d", ts),
+					Count: 1,
+				})
+			}
+			
+			_, _ = pipe.Exec(ctx)
+			
+			value := make(map[string]*model.FieldTimeValue)
+			for j, cmd := range allCmds {
+				if cmd == nil || !shouldIncludeField(fieldNames[j], opts.Fields) {
+					continue
+				}
+				
+				members, err := cmd.Result()
+				if err != nil || len(members) == 0 {
+					continue
+				}
+				
+				fieldTs, fieldValue, err := decodeMember(members[0])
+				if err != nil {
+					continue
+				}
+				
+				value[fieldNames[j]] = &model.FieldTimeValue{
+					Time:  time.UnixMicro(fieldTs),
+					Value: fieldValue,
+				}
+			}
+			
+			if len(value) > 0 {
+				tvs = append(tvs, &model.TimeValue{
+					Time:  time.UnixMicro(ts),
+					Value: value,
+				})
+			}
 		}
+		
 		results[i] = tvs
 	}
 
@@ -449,7 +401,7 @@ func (t *redisTimeline) GetRange(ctx context.Context, keys []string, start, end 
 }
 
 // GetLatest returns the complete merged state at the most recent timestamp for each key.
-func (t *redisTimeline) GetLatest(ctx context.Context, keys []string) ([]map[string]string, error) {
+func (t *redisTimeline) GetLatest(ctx context.Context, keys []string, opts model.QueryOptions) ([]map[string]*model.FieldTimeValue, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -457,101 +409,72 @@ func (t *redisTimeline) GetLatest(ctx context.Context, keys []string) ([]map[str
 	}
 
 	redisCli := t.cli.getRedisCli()
-	results := make([]map[string]string, len(keys))
+	fieldsKey := formatTimelineFields(t.name)
+	results := make([]map[string]*model.FieldTimeValue, len(keys))
 	be := model.NewBatchError(len(keys))
 
-	// Phase 1: Pipeline all ZRange commands to fetch timestamps
-	pipe := redisCli.Pipeline()
-	zrangeCmds := make([]*redis.StringSliceCmd, len(keys))
+	// Get all known fields for this timeline
+	fieldNames, err := redisCli.SMembers(ctx, fieldsKey).Result()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("failed to get timeline fields: %w", err)
+	}
+
 	for i, key := range keys {
-		tsKey := formatTimelineTS(t.name, key)
-		zrangeCmds[i] = pipe.ZRange(ctx, tsKey, 0, -1)
-	}
-
-	// Pipeline execution may fail, but individual commands may have succeeded
-	_, _ = pipe.Exec(ctx)
-
-	// Phase 2: Collect all timestamp results and build flat list of HGetAll operations
-	type hgetSpec struct {
-		keyIdx int
-		tsStr  string
-	}
-	var hgetSpecs []hgetSpec
-
-	for i, cmd := range zrangeCmds {
-		timestamps, err := cmd.Result()
-		if err != nil && err != redis.Nil {
-			be.Add(keys[i], fmt.Errorf("failed to query timestamps: %w", err))
-			continue
-		}
-		if len(timestamps) == 0 {
+		if len(fieldNames) == 0 {
 			results[i] = nil
 			continue
 		}
-		// Add all HGetAll operations needed for this key
-		for _, tsStr := range timestamps {
-			hgetSpecs = append(hgetSpecs, hgetSpec{keyIdx: i, tsStr: tsStr})
-		}
-	}
 
-	if len(hgetSpecs) == 0 {
-		return results, be.OrNil()
-	}
-
-	// Phase 3: Pipeline all HGetAll commands for data fetching
-	pipe = redisCli.Pipeline()
-	hgetCmds := make([]*redis.MapStringStringCmd, len(hgetSpecs))
-	for i, spec := range hgetSpecs {
-		dataKey := formatTimelineData(t.name, keys[spec.keyIdx], mustParseInt64(spec.tsStr))
-		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
-	}
-
-	// Pipeline execution may fail, but individual commands may have succeeded
-	_, _ = pipe.Exec(ctx)
-
-	// Phase 4: Map HGetAll results back to keys, building merged state per key
-	keyMerged := make([]map[string]string, len(keys))
-	for i, spec := range hgetSpecs {
-		fields, err := hgetCmds[i].Result()
-		if err != nil && err != redis.Nil {
-			be.Add(keys[spec.keyIdx], fmt.Errorf("failed to get data: %w", err))
-			// Mark this key as having an error so we don't set incomplete results
-			if keyMerged[spec.keyIdx] == nil {
-				keyMerged[spec.keyIdx] = map[string]string{} // Use empty map as error marker
+		// For each field, get the latest value
+		pipe := redisCli.Pipeline()
+		cmds := make([]*redis.StringSliceCmd, len(fieldNames))
+		
+		for j, fieldName := range fieldNames {
+			if !shouldIncludeField(fieldName, opts.Fields) {
+				continue
 			}
-			continue
+			
+			fieldKey := formatTimelineField(t.name, key, fieldName)
+			cmds[j] = pipe.ZRevRange(ctx, fieldKey, 0, 0)
 		}
-		if keyMerged[spec.keyIdx] == nil {
-			keyMerged[spec.keyIdx] = make(map[string]string)
+		
+		_, _ = pipe.Exec(ctx)
+		
+		result := make(map[string]*model.FieldTimeValue)
+		for j, cmd := range cmds {
+			if cmd == nil || !shouldIncludeField(fieldNames[j], opts.Fields) {
+				continue
+			}
+			
+			members, err := cmd.Result()
+			if err != nil || len(members) == 0 {
+				// Field doesn't exist for this key, skip it
+				continue
+			}
+			
+			fieldTs, fieldValue, err := decodeMember(members[0])
+			if err != nil {
+				continue
+			}
+			
+			result[fieldNames[j]] = &model.FieldTimeValue{
+				Time:  time.UnixMicro(fieldTs),
+				Value: fieldValue,
+			}
 		}
-		// Merge fields in chronological order
-		for k, v := range fields {
-			keyMerged[spec.keyIdx][k] = v
-		}
-	}
-
-	// Copy merged results to final results (only for keys without errors)
-	for i := range keys {
-		if len(keyMerged[i]) > 0 {
-			results[i] = keyMerged[i]
+		
+		if len(result) == 0 {
+			results[i] = nil
+		} else {
+			results[i] = result
 		}
 	}
 
 	return results, be.OrNil()
 }
 
-// timelineHgetSpec describes a single HGetAll operation needed for Timeline pipelining.
-type timelineHgetSpec struct {
-	resultIdx     int   // Index in the result array
-	tsMicros      int64 // Result timestamp
-	mergeTsMicros int64 // Data timestamp to merge
-}
-
-// Timeline returns all complete states for the key in chronological order.
-// 
-// Pipelined implementation: Reduces N² individual HGetAll calls to 3 pipeline rounds.
-// For a 100-point timeline: 5,050 network RTTs → 3 RTTs (99.94% reduction).
-func (t *redisTimeline) Timeline(ctx context.Context, key string) ([]*model.TimeValue, error) {
+// Timeline returns field-grouped time series for the key.
+func (t *redisTimeline) Timeline(ctx context.Context, key string, opts model.QueryOptions) (map[string][]*model.FieldTimeValue, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -563,71 +486,59 @@ func (t *redisTimeline) Timeline(ctx context.Context, key string) ([]*model.Time
 	}
 
 	redisCli := t.cli.getRedisCli()
-	tsKey := formatTimelineTS(t.name, key)
-
-	// Phase 1: Fetch all timestamps using ZRange
-	timestamps, err := redisCli.ZRange(ctx, tsKey, 0, -1).Result()
-	if err != nil {
-		return nil, fmt.Errorf("failed to query timestamps: %w", err)
+	fieldsKey := formatTimelineFields(t.name)
+	
+	// Get all known fields for this timeline
+	fieldNames, err := redisCli.SMembers(ctx, fieldsKey).Result()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("failed to get timeline fields: %w", err)
 	}
 
-	if len(timestamps) == 0 {
-		return nil, nil
+	if len(fieldNames) == 0 {
+		return nil, fmt.Errorf("key '%s' not found in timeline '%s'", key, t.name)
 	}
 
-	// Phase 2: Build hgetSpecs for all (i,j) pairs where j ≤ i
-	// For each result timestamp i, we need to merge all data from timestamps 0..i.
-	// This creates a triangular number of specs: n=10 → 55 specs, n=100 → 5,050 specs.
-	var hgetSpecs []timelineHgetSpec
-	for i, tsStr := range timestamps {
-		tsMicros := mustParseInt64(tsStr)
-		// For this result timestamp, collect all timestamps <= it for merging
-		for j := 0; j <= i; j++ {
-			hgetSpecs = append(hgetSpecs, timelineHgetSpec{
-				resultIdx:     i,
-				tsMicros:      tsMicros,
-				mergeTsMicros: mustParseInt64(timestamps[j]),
-			})
-		}
-	}
-
-	// Phase 3: Pipeline all HGetAll operations
+	// For each field, get all its values
 	pipe := redisCli.Pipeline()
-	hgetCmds := make([]*redis.MapStringStringCmd, len(hgetSpecs))
-	for i, spec := range hgetSpecs {
-		dataKey := formatTimelineData(t.name, key, spec.mergeTsMicros)
-		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
-	}
-
-	// Execute pipeline - may fail, but individual commands may have succeeded
-	_, _ = pipe.Exec(ctx)
-
-	// Phase 4: Reconstruct merged states from pipelined results
-	result := make([]*model.TimeValue, len(timestamps))
-	resultMerged := make([]map[string]string, len(timestamps))
-
-	for i, spec := range hgetSpecs {
-		fields, err := hgetCmds[i].Result()
-		if err != nil && err != redis.Nil {
-			// Skip failed fetches - partial data is acceptable
+	cmds := make([]*redis.StringSliceCmd, len(fieldNames))
+	
+	for j, fieldName := range fieldNames {
+		if !shouldIncludeField(fieldName, opts.Fields) {
 			continue
 		}
-
-		if resultMerged[spec.resultIdx] == nil {
-			resultMerged[spec.resultIdx] = make(map[string]string)
-		}
-		// Merge fields in chronological order
-		for k, v := range fields {
-			resultMerged[spec.resultIdx][k] = v
-		}
+		
+		fieldKey := formatTimelineField(t.name, key, fieldName)
+		cmds[j] = pipe.ZRange(ctx, fieldKey, 0, -1)
 	}
-
-	// Build final result array
-	for i, tsStr := range timestamps {
-		tsMicros := mustParseInt64(tsStr)
-		result[i] = &model.TimeValue{
-			Time:  time.UnixMicro(tsMicros),
-			Value: resultMerged[i],
+	
+	_, _ = pipe.Exec(ctx)
+	
+	result := make(map[string][]*model.FieldTimeValue)
+	for j, cmd := range cmds {
+		if cmd == nil || !shouldIncludeField(fieldNames[j], opts.Fields) {
+			continue
+		}
+		
+		members, err := cmd.Result()
+		if err != nil {
+			continue
+		}
+		
+		var series []*model.FieldTimeValue
+		for _, member := range members {
+			fieldTs, fieldValue, err := decodeMember(member)
+			if err != nil {
+				continue
+			}
+			
+			series = append(series, &model.FieldTimeValue{
+				Time:  time.UnixMicro(fieldTs),
+				Value: fieldValue,
+			})
+		}
+		
+		if len(series) > 0 {
+			result[fieldNames[j]] = series
 		}
 	}
 
@@ -635,7 +546,7 @@ func (t *redisTimeline) Timeline(ctx context.Context, key string) ([]*model.Time
 }
 
 // GetAffectedRange returns all states from insertedAt (inclusive) to end of timeline.
-func (t *redisTimeline) GetAffectedRange(ctx context.Context, key string, insertedAt time.Time) ([]*model.TimeValue, error) {
+func (t *redisTimeline) GetAffectedRange(ctx context.Context, key string, insertedAt time.Time, opts model.QueryOptions) ([]*model.TimeValue, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -648,102 +559,125 @@ func (t *redisTimeline) GetAffectedRange(ctx context.Context, key string, insert
 
 	insertedMicros := normalizeTimestamp(insertedAt)
 	redisCli := t.cli.getRedisCli()
-	tsKey := formatTimelineTS(t.name, key)
+	fieldsKey := formatTimelineFields(t.name)
+	
+	// Get all known fields for this timeline
+	fieldNames, err := redisCli.SMembers(ctx, fieldsKey).Result()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("failed to get timeline fields: %w", err)
+	}
 
-	// Phase 1: Pipeline both ZRangeArgs (affected range) and ZRange (all timestamps) commands
+	if len(fieldNames) == 0 {
+		return nil, fmt.Errorf("key '%s' not found in timeline '%s'", key, t.name)
+	}
+
+	// Collect all unique timestamps >= insertedAt from specified fields
+	timestampsMap := make(map[int64]bool)
+	
 	pipe := redisCli.Pipeline()
-	affectedCmd := pipe.ZRangeArgs(ctx, redis.ZRangeArgs{
-		Key:     tsKey,
-		Start:   fmt.Sprintf("%d", insertedMicros),
-		Stop:    "+inf",
-		ByScore: true,
-	})
-	allCmd := pipe.ZRange(ctx, tsKey, 0, -1)
-
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		return nil, fmt.Errorf("failed to query timestamps: %w", err)
+	rangeCmds := make([]*redis.StringSliceCmd, len(fieldNames))
+	
+	for j, fieldName := range fieldNames {
+		if !shouldIncludeField(fieldName, opts.Fields) {
+			continue
+		}
+		
+		fieldKey := formatTimelineField(t.name, key, fieldName)
+		rangeCmds[j] = pipe.ZRangeByScore(ctx, fieldKey, &redis.ZRangeBy{
+			Min: fmt.Sprintf("%d", insertedMicros),
+			Max: "+inf",
+		})
 	}
-
-	timestamps, err := affectedCmd.Result()
-	if err != nil && err != redis.Nil {
-		return nil, fmt.Errorf("failed to query timestamps: %w", err)
-	}
-
-	allTimestamps, err := allCmd.Result()
-	if err != nil && err != redis.Nil {
-		return nil, fmt.Errorf("failed to query all timestamps: %w", err)
-	}
-
-	if len(timestamps) == 0 {
-		return nil, nil
-	}
-
-	// Phase 2: Collect results and determine all HGetAll operations needed for merging
-	type hgetSpec struct {
-		resultIdx     int   // Index in the result array
-		tsMicros      int64 // Result timestamp
-		mergeTsMicros int64 // Data timestamp to merge
-	}
-	var hgetSpecs []hgetSpec
-
-	for resultIdx, tsStr := range timestamps {
-		tsMicros := mustParseInt64(tsStr)
-		// For each result timestamp, collect all timestamps ≤ it for merging
-		for _, allTsStr := range allTimestamps {
-			allTsMicros := mustParseInt64(allTsStr)
-			if allTsMicros <= tsMicros {
-				hgetSpecs = append(hgetSpecs, hgetSpec{
-					resultIdx:     resultIdx,
-					tsMicros:      tsMicros,
-					mergeTsMicros: allTsMicros,
-				})
+	
+	_, _ = pipe.Exec(ctx)
+	
+	for j, cmd := range rangeCmds {
+		if cmd == nil || !shouldIncludeField(fieldNames[j], opts.Fields) {
+			continue
+		}
+		
+		members, err := cmd.Result()
+		if err != nil {
+			continue
+		}
+		
+		for _, member := range members {
+			fieldTs, _, err := decodeMember(member)
+			if err == nil {
+				timestampsMap[fieldTs] = true
 			}
 		}
 	}
 
-	// Phase 3: Pipeline all HGetAll commands for data fetching
-	pipe = redisCli.Pipeline()
-	hgetCmds := make([]*redis.MapStringStringCmd, len(hgetSpecs))
-	for i, spec := range hgetSpecs {
-		dataKey := formatTimelineData(t.name, key, spec.mergeTsMicros)
-		hgetCmds[i] = pipe.HGetAll(ctx, dataKey)
+	// Sort timestamps
+	timestamps := make([]int64, 0, len(timestampsMap))
+	for ts := range timestampsMap {
+		timestamps = append(timestamps, ts)
 	}
-
-	// Pipeline execution may fail, but individual commands may have succeeded
-	_, _ = pipe.Exec(ctx)
-
-	// Phase 4: Build merged state for each affected timestamp using pipelined data
-	result := make([]*model.TimeValue, len(timestamps))
-	resultMerged := make([]map[string]string, len(timestamps))
-
-	for i, spec := range hgetSpecs {
-		fields, err := hgetCmds[i].Result()
-		if err != nil && err != redis.Nil {
-			continue // Skip failed fetches
-		}
-
-		if resultMerged[spec.resultIdx] == nil {
-			resultMerged[spec.resultIdx] = make(map[string]string)
-		}
-		// Merge fields in chronological order
-		for k, v := range fields {
-			resultMerged[spec.resultIdx][k] = v
+	// Simple bubble sort
+	for a := 0; a < len(timestamps)-1; a++ {
+		for b := a + 1; b < len(timestamps); b++ {
+			if timestamps[a] > timestamps[b] {
+				timestamps[a], timestamps[b] = timestamps[b], timestamps[a]
+			}
 		}
 	}
 
-	// Build final result array
-	for i, tsStr := range timestamps {
-		tsMicros := mustParseInt64(tsStr)
-		result[i] = &model.TimeValue{
-			Time:  time.UnixMicro(tsMicros),
-			Value: resultMerged[i],
+	// For each timestamp, build complete state
+	var result []*model.TimeValue
+	for _, ts := range timestamps {
+		pipe := redisCli.Pipeline()
+		allCmds := make([]*redis.StringSliceCmd, len(fieldNames))
+		
+		for j, fieldName := range fieldNames {
+			if !shouldIncludeField(fieldName, opts.Fields) {
+				continue
+			}
+			
+			fieldKey := formatTimelineField(t.name, key, fieldName)
+			allCmds[j] = pipe.ZRevRangeByScore(ctx, fieldKey, &redis.ZRangeBy{
+				Min:   "-inf",
+				Max:   fmt.Sprintf("%d", ts),
+				Count: 1,
+			})
+		}
+		
+		_, _ = pipe.Exec(ctx)
+		
+		value := make(map[string]*model.FieldTimeValue)
+		for j, cmd := range allCmds {
+			if cmd == nil || !shouldIncludeField(fieldNames[j], opts.Fields) {
+				continue
+			}
+			
+			members, err := cmd.Result()
+			if err != nil || len(members) == 0 {
+				continue
+			}
+			
+			fieldTs, fieldValue, err := decodeMember(members[0])
+			if err != nil {
+				continue
+			}
+			
+			value[fieldNames[j]] = &model.FieldTimeValue{
+				Time:  time.UnixMicro(fieldTs),
+				Value: fieldValue,
+			}
+		}
+		
+		if len(value) > 0 {
+			result = append(result, &model.TimeValue{
+				Time:  time.UnixMicro(ts),
+				Value: value,
+			})
 		}
 	}
 
 	return result, nil
 }
 
-// Keys returns all logical keys, optionally filtered by labels.
+// Keys returns all logical keys, optionally filtered by labels and update time.
 func (t *redisTimeline) Keys(ctx context.Context, opt model.FilterOptions) ([]string, error) {
 	select {
 	case <-ctx.Done():
@@ -755,76 +689,105 @@ func (t *redisTimeline) Keys(ctx context.Context, opt model.FilterOptions) ([]st
 	keysKey := formatTimelineKeys(t.name)
 	labelFilters := opt.LabelFilter
 
+	// Start with all keys or label-filtered keys
+	var result []string
+	var err error
+
 	if len(labelFilters) == 0 {
-		result, err := redisCli.SMembers(ctx, keysKey).Result()
+		result, err = redisCli.SMembers(ctx, keysKey).Result()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get keys: %w", err)
 		}
-		return result, nil
-	}
-
-	// Pipeline SMEMBERS for every label across all filter steps.
-	pipe := redisCli.Pipeline()
-	cmds := map[string]*redis.StringSliceCmd{}
-	for _, step := range labelFilters {
-		for _, label := range step {
-			labelKey := formatTimelineLabel(t.name, label)
-			if _, exists := cmds[labelKey]; !exists {
-				cmds[labelKey] = pipe.SMembers(ctx, labelKey)
-			}
-		}
-	}
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		return nil, fmt.Errorf("failed to get label members: %w", err)
-	}
-
-	// Build filterStepsNew: each step is a slice of key-sets (one per label).
-	filterStepsNew := make([][]map[string]bool, 0, len(labelFilters))
-	for _, step := range labelFilters {
-		keysets := make([]map[string]bool, 0, len(step))
-		for _, label := range step {
-			labelKey := formatTimelineLabel(t.name, label)
-			members, err := cmds[labelKey].Result()
-			if err != nil && err != redis.Nil {
-				return nil, fmt.Errorf("failed to get members for label %s: %w", label, err)
-			}
-			keysets = append(keysets, arrToMap(members))
-		}
-		filterStepsNew = append(filterStepsNew, keysets)
-	}
-
-	// Step 0: union of all label sets.
-	base := map[string]bool{}
-	for i, keysets := range filterStepsNew {
-		collection := map[string]bool{}
-		if len(keysets) == 0 {
-			// Empty step — get all keys.
-			all, err := redisCli.SMembers(ctx, keysKey).Result()
-			if err != nil {
-				return nil, fmt.Errorf("failed to get all keys: %w", err)
-			}
-			collection = arrToMap(all)
-		} else {
-			for j, keyset := range keysets {
-				if j == 0 {
-					collection = keyset
-				} else {
-					collection = union(collection, keyset)
+	} else {
+		// Pipeline SMEMBERS for every label across all filter steps.
+		pipe := redisCli.Pipeline()
+		cmds := map[string]*redis.StringSliceCmd{}
+		for _, step := range labelFilters {
+			for _, label := range step {
+				labelKey := formatTimelineLabel(t.name, label)
+				if _, exists := cmds[labelKey]; !exists {
+					cmds[labelKey] = pipe.SMembers(ctx, labelKey)
 				}
 			}
 		}
-		if i == 0 {
-			base = collection
-		} else {
-			base = intersect(base, collection)
+		if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+			return nil, fmt.Errorf("failed to get label members: %w", err)
+		}
+
+		// Build filterStepsNew: each step is a slice of key-sets (one per label).
+		filterStepsNew := make([][]map[string]bool, 0, len(labelFilters))
+		for _, step := range labelFilters {
+			keysets := make([]map[string]bool, 0, len(step))
+			for _, label := range step {
+				labelKey := formatTimelineLabel(t.name, label)
+				members, err := cmds[labelKey].Result()
+				if err != nil && err != redis.Nil {
+					return nil, fmt.Errorf("failed to get members for label %s: %w", label, err)
+				}
+				keysets = append(keysets, arrToMap(members))
+			}
+			filterStepsNew = append(filterStepsNew, keysets)
+		}
+
+		// Step 0: union of all label sets.
+		base := map[string]bool{}
+		for i, keysets := range filterStepsNew {
+			collection := map[string]bool{}
+			if len(keysets) == 0 {
+				// Empty step — get all keys.
+				all, err := redisCli.SMembers(ctx, keysKey).Result()
+				if err != nil {
+					return nil, fmt.Errorf("failed to get all keys: %w", err)
+				}
+				collection = arrToMap(all)
+			} else {
+				for j, keyset := range keysets {
+					if j == 0 {
+						collection = keyset
+					} else {
+						collection = union(collection, keyset)
+					}
+				}
+			}
+			if i == 0 {
+				base = collection
+			} else {
+				base = intersect(base, collection)
+			}
+		}
+
+		result = make([]string, 0, len(base))
+		for key := range base {
+			result = append(result, key)
 		}
 	}
 
-	ret := make([]string, 0, len(base))
-	for key := range base {
-		ret = append(ret, key)
+	// Apply time filter if specified
+	if opt.AfterTs != nil {
+		afterMicros := normalizeTimestamp(*opt.AfterTs)
+		globalTSKey := formatTimelineGlobalTS(t.name)
+		
+		// Query keys with timestamp > afterMicros
+		updatedKeys, err := redisCli.ZRangeByScore(ctx, globalTSKey, &redis.ZRangeBy{
+			Min: fmt.Sprintf("(%d", afterMicros), // Exclusive
+			Max: "+inf",
+		}).Result()
+		if err != nil && err != redis.Nil {
+			return nil, fmt.Errorf("failed to query updated keys: %w", err)
+		}
+		
+		// Intersect with current result
+		updatedSet := arrToMap(updatedKeys)
+		filtered := []string{}
+		for _, key := range result {
+			if updatedSet[key] {
+				filtered = append(filtered, key)
+			}
+		}
+		result = filtered
 	}
-	return ret, nil
+
+	return result, nil
 }
 
 // AddKeyLabels associates labels with a logical key.
@@ -845,9 +808,9 @@ func (t *redisTimeline) AddKeyLabels(ctx context.Context, key string, labels []s
 			continue
 		}
 		labelKey := formatTimelineLabel(t.name, label)
-		pipe.SAdd(ctx, labelsKey, label)    // T@{name}/L/ ← label name
-		pipe.SAdd(ctx, labelKey, key)       // T@{name}/L/{label} ← key (inverted index)
-		pipe.SAdd(ctx, keyLabelsKey, label) // T@{name}/K/{key}/L ← label (forward index)
+		pipe.SAdd(ctx, labelsKey, label)
+		pipe.SAdd(ctx, labelKey, key)
+		pipe.SAdd(ctx, keyLabelsKey, label)
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
@@ -873,8 +836,8 @@ func (t *redisTimeline) RemoveKeyLabels(ctx context.Context, key string, labels 
 			continue
 		}
 		labelKey := formatTimelineLabel(t.name, label)
-		pipe.SRem(ctx, labelKey, key)       // T@{name}/L/{label} ← remove key
-		pipe.SRem(ctx, keyLabelsKey, label) // T@{name}/K/{key}/L ← remove label
+		pipe.SRem(ctx, labelKey, key)
+		pipe.SRem(ctx, keyLabelsKey, label)
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
@@ -906,7 +869,7 @@ func (t *redisTimeline) KeyLabels(ctx context.Context, key string) (model.LabelS
 	return ls, nil
 }
 
-// Remove removes the specified keys from the timeline, cleaning up label indexes.
+// Remove removes the specified keys from the timeline, cleaning up label indexes and field data.
 func (t *redisTimeline) Remove(ctx context.Context, keys []string) error {
 	select {
 	case <-ctx.Done():
@@ -926,19 +889,37 @@ func (t *redisTimeline) Remove(ctx context.Context, keys []string) error {
 			return fmt.Errorf("failed to read labels for key %s: %w", key, err)
 		}
 
+		// Find all field keys for this key
+		pattern := formatTimelineField(t.name, key, "*")
+		var fieldKeys []string
+		iter := redisCli.Scan(ctx, 0, pattern, 0).Iterator()
+		for iter.Next(ctx) {
+			fieldKeys = append(fieldKeys, iter.Val())
+		}
+		if err := iter.Err(); err != nil {
+			return fmt.Errorf("failed to scan field keys: %w", err)
+		}
+
 		pipe := redisCli.Pipeline()
+		
 		// Remove key from each inverted label set.
 		for _, label := range labels {
 			pipe.SRem(ctx, formatTimelineLabel(t.name, label), key)
 		}
+		
 		// Delete the forward label index for this key.
 		pipe.Del(ctx, keyLabelsKey)
+		
 		// Remove from keys set.
 		pipe.SRem(ctx, keysKey, key)
-		// Delete timestamps ZSET.
-		pipe.Del(ctx, formatTimelineTS(t.name, key))
+		
 		// Remove from global timestamp index.
 		pipe.ZRem(ctx, globalTSKey, key)
+		
+		// Delete all field ZSETs
+		for _, fieldKey := range fieldKeys {
+			pipe.Del(ctx, fieldKey)
+		}
 
 		if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 			return fmt.Errorf("failed to remove key %s: %w", key, err)
@@ -948,13 +929,7 @@ func (t *redisTimeline) Remove(ctx context.Context, keys []string) error {
 	return nil
 }
 
-// Clear removes all data from the timeline but keeps the timeline instance.
 // Clear removes all data from the timeline using prefix-based scanning.
-// This ensures complete cleanup including any orphaned keys not tracked in sets.
-//
-// Clear is intended for startup/reload scenarios. It is non-atomic - keys added
-// during the scan may not be deleted. All keys matching "T@{name}/*" are removed,
-// including data hashes, timestamp indexes, label indexes, and tracking sets.
 func (t *redisTimeline) Clear(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
@@ -977,7 +952,6 @@ func (t *redisTimeline) Delete(ctx context.Context) error {
 }
 
 // WithOptions sets the configuration options for the timeline and returns self for method chaining.
-// The options apply to all keys in the timeline and are stored in-memory only.
 func (t *redisTimeline) WithOptions(opts model.TimelineOptions) model.CacheTimeline {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -986,159 +960,97 @@ func (t *redisTimeline) WithOptions(opts model.TimelineOptions) model.CacheTimel
 }
 
 // GetOptions returns the timeline's configuration options.
-// Returns zero values if no options have been set (meaning unlimited retention).
 func (t *redisTimeline) GetOptions() model.TimelineOptions {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return model.TimelineOptions{Retention: t.retention}
 }
 
-// GetUpdatedKeys returns all keys that have been updated after the specified timestamp.
-func (t *redisTimeline) GetUpdatedKeys(ctx context.Context, after time.Time) ([]string, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	afterMicros := normalizeTimestamp(after)
-	redisCli := t.cli.getRedisCli()
-	globalTSKey := formatTimelineGlobalTS(t.name)
-
-	// Query the global timestamp index for all keys with timestamps > after
-	// Using exclusive range: (afterMicros means strictly greater than afterMicros
-	keys, err := redisCli.ZRangeArgs(ctx, redis.ZRangeArgs{
-		Key:     globalTSKey,
-		Start:   fmt.Sprintf("(%d", afterMicros),
-		Stop:    "+inf",
-		ByScore: true,
-	}).Result()
-
-	if err != nil && err != redis.Nil {
-		return nil, fmt.Errorf("failed to query updated keys: %w", err)
-	}
-
-	return keys, nil
-}
-
-// calculateRemovalBoundary calculates how many time points to remove from the beginning
-// of the timeline to satisfy the retention policy. Returns 0 if no removal needed.
-// Algorithm ported from pkg/client/mem/timeline.go:671-728
-func (t *redisTimeline) calculateRemovalBoundary(timestamps []redis.Z, policy model.RetentionPolicy) int {
-	if len(timestamps) == 0 {
-		return 0
-	}
-
-	var countBoundary = 0
-	var durationBoundary = 0
-
-	// Calculate count boundary: remove oldest points to stay within MaxCount
-	if policy.MaxCount > 0 && len(timestamps) > policy.MaxCount {
-		countBoundary = len(timestamps) - policy.MaxCount
-	}
-
-	// Calculate duration boundary: remove points older than MaxDuration
-	if policy.MaxDuration > 0 {
-		mostRecentTs := int64(timestamps[len(timestamps)-1].Score)
-		cutoffTs := mostRecentTs - policy.MaxDuration.Microseconds()
-
-		// Reverse scan to find first timestamp below cutoff
-		for i := len(timestamps) - 1; i >= 0; i-- {
-			if int64(timestamps[i].Score) < cutoffTs {
-				durationBoundary = i + 1
-				break
-			}
-		}
-	}
-
-	// Apply strategy to determine final boundary
-	var removeBeforeIdx int
-	if policy.MaxCount == 0 {
-		// Duration only
-		removeBeforeIdx = durationBoundary
-	} else if policy.MaxDuration == 0 {
-		// Count only
-		removeBeforeIdx = countBoundary
-	} else {
-		// Both constraints: apply strategy
-		if policy.Strategy == model.RetentionMax {
-			// Keep MORE data (remove LESS): use minimum boundary
-			if countBoundary < durationBoundary {
-				removeBeforeIdx = countBoundary
-			} else {
-				removeBeforeIdx = durationBoundary
-			}
-		} else {
-			// RetentionMin: Keep LESS data (remove MORE): use maximum boundary
-			if countBoundary > durationBoundary {
-				removeBeforeIdx = countBoundary
-			} else {
-				removeBeforeIdx = durationBoundary
-			}
-		}
-	}
-
-	return removeBeforeIdx
-}
-
-// enforceRetention removes old time points from Redis to satisfy the retention policy.
-// This method is called after every Append/Insert operation (best-effort semantics).
+// enforceRetention removes old time points from each field's ZSET based on retention policy.
 func (t *redisTimeline) enforceRetention(ctx context.Context, key string) error {
-	// Step 1: Get retention policy from memory
 	t.mu.RLock()
 	policy := t.retention
 	t.mu.RUnlock()
 
-	// Fast path: no retention configured
 	if policy.MaxCount == 0 && policy.MaxDuration == 0 {
 		return nil
 	}
 
-	// Step 2: Get current timestamps from Redis
 	redisCli := t.cli.getRedisCli()
-	tsKey := formatTimelineTS(t.name, key)
-
-	timestamps, err := redisCli.ZRangeWithScores(ctx, tsKey, 0, -1).Result()
-	if err != nil {
-		return fmt.Errorf("failed to get timestamps: %w", err)
+	fieldsKey := formatTimelineFields(t.name)
+	
+	// Get all known fields for this timeline
+	fieldNames, err := redisCli.SMembers(ctx, fieldsKey).Result()
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("failed to get timeline fields: %w", err)
 	}
 
-	if len(timestamps) == 0 {
-		return nil // Nothing to enforce
+	// For each field, apply retention
+	for _, fieldName := range fieldNames {
+		fieldKey := formatTimelineField(t.name, key, fieldName)
+		count, err := redisCli.ZCard(ctx, fieldKey).Result()
+		if err != nil || count == 0 {
+			continue
+		}
+
+		var countBoundary int64
+		var durationBoundary int64
+
+		// Calculate count boundary
+		if policy.MaxCount > 0 && int(count) > policy.MaxCount {
+			countBoundary = count - int64(policy.MaxCount)
+		}
+
+		// Calculate duration boundary
+		if policy.MaxDuration > 0 {
+			// Get the most recent timestamp
+			members, err := redisCli.ZRevRange(ctx, fieldKey, 0, 0).Result()
+			if err == nil && len(members) > 0 {
+				mostRecentTs, _, err := decodeMember(members[0])
+				if err == nil {
+					cutoffTs := mostRecentTs - policy.MaxDuration.Microseconds()
+					
+					// Count how many elements are below cutoff
+					countBelow, err := redisCli.ZCount(ctx, fieldKey, "-inf", fmt.Sprintf("(%d", cutoffTs)).Result()
+					if err == nil {
+						durationBoundary = countBelow
+					}
+				}
+			}
+		}
+
+		// Determine removal boundary based on strategy
+		var removeCount int64
+		if policy.MaxCount == 0 {
+			removeCount = durationBoundary
+		} else if policy.MaxDuration == 0 {
+			removeCount = countBoundary
+		} else {
+			if policy.Strategy == model.RetentionMax {
+				// Keep more data: remove less
+				if countBoundary < durationBoundary {
+					removeCount = countBoundary
+				} else {
+					removeCount = durationBoundary
+				}
+			} else {
+				// RetentionMin: Keep less data: remove more
+				if countBoundary > durationBoundary {
+					removeCount = countBoundary
+				} else {
+					removeCount = durationBoundary
+				}
+			}
+		}
+
+		// Remove old elements from the ZSET
+		if removeCount > 0 {
+			_, err := redisCli.ZPopMin(ctx, fieldKey, removeCount).Result()
+			if err != nil {
+				return fmt.Errorf("failed to remove old elements: %w", err)
+			}
+		}
 	}
 
-	// Step 3: Calculate removal boundary
-	removeBeforeIdx := t.calculateRemovalBoundary(timestamps, policy)
-
-	if removeBeforeIdx == 0 {
-		return nil // No cleanup needed
-	}
-
-	// Step 4: Pipeline cleanup operations
-	pipe := redisCli.Pipeline()
-
-	// Remove old timestamps from ZSET
-	oldestScore := int64(timestamps[0].Score)
-	boundaryScore := int64(timestamps[removeBeforeIdx-1].Score)
-	pipe.ZRemRangeByScore(ctx, tsKey,
-		fmt.Sprintf("%d", oldestScore),
-		fmt.Sprintf("%d", boundaryScore))
-
-	// Remove corresponding data HASHes
-	for i := 0; i < removeBeforeIdx; i++ {
-		tsMicros := int64(timestamps[i].Score)
-		dataKey := formatTimelineData(t.name, key, tsMicros)
-		pipe.Del(ctx, dataKey)
-	}
-
-	// Execute pipeline
-	_, err = pipe.Exec(ctx)
-	return err
-}
-
-// Helper function to parse int64 from string
-func mustParseInt64(s string) int64 {
-	var result int64
-	_, _ = fmt.Sscanf(s, "%d", &result)
-	return result
+	return nil
 }
